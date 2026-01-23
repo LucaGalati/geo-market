@@ -1,0 +1,11 @@
+Run master.py to gather and prepare data to generate files necessary for R analysis. 
+
+For TRTH preprocessing directly:
+  python src/d01_preprocessing/trth_streamed.py [file.gz] --timings --phase2-workers 4
+  python src/d01_preprocessing/trth_streamed.py --temp-format parquet --output-format parquet
+
+
+Tested on Dec 1, 2025
+Device: MacBook Pro M4 Max
+Memory: 32GB
+macOS: 26.1

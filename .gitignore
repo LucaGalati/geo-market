@@ -1,0 +1,9 @@
+data
+output
+__pycache__
+.jupyter
+.ipynb_checkpoints
+.vscode
+.DS_Store
+.idea
+geo-capital

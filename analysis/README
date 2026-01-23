@@ -1,0 +1,17 @@
+Run main.py to replicate all the results together
+
+Run src/d00_preprocessing/gathering.py and src/d00_preprocessing/matching.py before running the below codes to replicate results separately
+Run src/d01_figures/daily.py to replicate daily figures
+Run src/d01_figures/intraday.py to replicate intraday figures
+Run src/d02_results/daily.R to replicate daily-level results
+Run src/d02_results/intraday.R to replicate intraday-level results
+Run src/d02_results/russiaukraine.R to replicate results for the Russian and Ukrainen firms
+Run src/d02_results/aerospacedefense.R to replicate results for the Aerospace and Defense firms
+
+
+Tested on Dec 1, 2025
+Device: MacBook Pro M4 Max
+Memory: 32GB
+macOS: 26.1
+
+R: 4.5.2
