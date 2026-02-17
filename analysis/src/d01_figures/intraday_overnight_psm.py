@@ -9,7 +9,7 @@ from pathlib import Path
 
 DATA_ROOT   = Path(__file__).resolve().parents[2] / "data"
 OUTPUT_ROOT = Path(__file__).resolve().parents[2] / "output"
-INTRADAY    = DATA_ROOT / "intraday_balanced_psm.csv"
+INTRADAY    = DATA_ROOT / "intraday_balanced.csv"
 
 OUT_DIR     = OUTPUT_ROOT / "intraday" / "figures" / "psm" / "overnight"
 OUT_DIR.mkdir(parents=True, exist_ok=True)

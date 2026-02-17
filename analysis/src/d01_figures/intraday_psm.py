@@ -1,227 +1,390 @@
-import pandas as pd
+import pandas as pd 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 from pathlib import Path
+import statsmodels.api as sm
+from statsmodels.iolib.summary2 import summary_col
 
 # ---------- PATHS ----------
 DATA_ROOT   = Path(__file__).resolve().parents[2] / "data"
 OUTPUT_ROOT = Path(__file__).resolve().parents[2] / "output"
-INTRADAY    = DATA_ROOT / "intraday_balanced_psm.csv"
+INTRADAY    = DATA_ROOT / "intraday_balanced.csv"
+OUT_DIR     = OUTPUT_ROOT / "intraday" / "figures" / "psm" / "ci_90_winsor_99" / "qspread"
+OUT_DIR2    = OUTPUT_ROOT / "intraday" / "tables" / "psm" 
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+OUT_DIR2.mkdir(parents=True, exist_ok=True)
 
-OUT_BASE  = OUTPUT_ROOT / "intraday" / "figures" / "psm" / "confidence_interval"
-OUT_FIVE  = OUT_BASE / "five_trading_days"
-OUT_BOUND = OUT_BASE / "close_open"
-OUT_24H   = OUT_BASE / "high_frequency"
-for p in [OUT_BASE, OUT_FIVE, OUT_BOUND, OUT_24H]:
-    p.mkdir(parents=True, exist_ok=True)
-
-# ---------- READ DATA ----------
+# ---------- READ ----------
 df = pd.read_csv(INTRADAY, low_memory=False)
-
-# ---------- TARGET VARIABLES ----------
-vars_to_plot = ["qspread_mean", "espread_mean", "dollar_volume_sum", "trades_count", "intraday_5m_vol_mean", "intraday_vol_mean"]
-present_vars = [v for v in vars_to_plot if v in df.columns]
-if not present_vars:
-    raise ValueError(f"None of the expected variables found: {vars_to_plot}")
-
-# ---------- DATETIME ----------
-if "datetime" not in df.columns:
-    raise ValueError("Expected a 'datetime' column in intraday_balanced.csv")
-
 df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce", utc=True)
-df = df.dropna(subset=["datetime"]).copy()
+df.dropna(subset=["datetime"], inplace=True)
+df.sort_values(["ric", "datetime"], kind="mergesort", inplace=True)
 
-# ---------- SORT ----------
-if "ric" in df.columns:
-    df.sort_values(["ric", "datetime"], kind="mergesort", inplace=True, ignore_index=True)
-else:
-    df.sort_values("datetime", kind="mergesort", inplace=True, ignore_index=True)
-
-# ---------- LABEL GROUPS ----------
-label_map = {1: "Nearby", 0: "Distant"}
-if "psm_group" in df.columns:
-    df["psm_group"] = pd.to_numeric(df["psm_group"], errors="coerce")
-    df["sample_label"] = df["psm_group"].map(label_map)
-else:
-    df["sample_label"] = "All"
-
-# ---------- NUMERIC & LOG TRANSFORMS ----------
-for v in present_vars:
-    df[v] = pd.to_numeric(df[v], errors="coerce")
-
-for v in ["dollar_volume_sum", "trades_count"]:
-    if v in df.columns:
-        df[v] = np.log(df[v].where(df[v] > 0))
-
-# ---------- EVENT DATE & TRADING-DAY INDEX ----------
-event_day = pd.Timestamp("2022-02-24", tz="UTC")
+df["psm_group"] = pd.to_numeric(df["psm_group"], errors="coerce")
+df = df[df["psm_group"].isin([0, 1])].copy()
+df["group"] = df["psm_group"].map({1: "Nearby", 0: "Distant"})
 df["date_utc"] = df["datetime"].dt.normalize()
-unique_days = np.sort(df["date_utc"].dropna().unique())
-day_index = pd.Series(range(len(unique_days)), index=unique_days)
-if event_day not in day_index.index:
-    raise ValueError(f"Event day {event_day.date()} not present in dataset.")
+EVENT_DAY = pd.Timestamp("2022-02-24", tz="UTC")
+days = np.sort(df["date_utc"].unique())
+day_to_idx = {d: i for i, d in enumerate(days)}
+event_idx = day_to_idx[EVENT_DAY]
+df["day_rel"] = df["date_utc"].map(lambda d: day_to_idx[d] - event_idx)
 
-event_idx = int(day_index.loc[event_day])
-df["trading_day_index"] = df["date_utc"].map(day_index)
-df["days_from_event"] = df["trading_day_index"] - event_idx
+# ---------- HOUR WINDOWS ----------
+mins = df.groupby(["ric","date_utc"])["datetime"].min().rename("first_dt")
+maxs = df.groupby(["ric","date_utc"])["datetime"].max().rename("last_dt")
+bounds = pd.concat([mins,maxs],axis=1).reset_index()
+df = df.merge(bounds,on=["ric","date_utc"],how="left")
+
+df["is_open_hour"]  = (df["datetime"] >= df["first_dt"]) & (df["datetime"] <= df["first_dt"] + pd.Timedelta(minutes=60))
+df["is_close_hour"] = (df["datetime"] >= df["last_dt"] - pd.Timedelta(minutes=60)) & (df["datetime"] <= df["last_dt"])
+
+def hourly_mean(flag):
+    sub = df[df[flag]]
+    return (sub.groupby(["ric","date_utc","group","day_rel"])["qspread_mean"]
+              .mean(numeric_only=True)
+              .reset_index()
+              .rename(columns={"qspread_mean":"hour_mean"}))
+
+open_hr, close_hr = hourly_mean("is_open_hour"), hourly_mean("is_close_hour")
+
+BENCH_WIN = (-10, -6)
+PRE_WIN   = (-5, -1)
+POST_WIN  = (0, 5)
+DAYS      = list(range(-5, 6))
+
+# ---------- BENCHMARKS ----------
+def compute_benchmarks(hr_df, lo, hi):
+    z = hr_df[hr_df["day_rel"].between(lo, hi)].copy()
+    gday = z.groupby(["group","day_rel"])["hour_mean"].mean().reset_index()
+    gbench = gday.groupby("group")["hour_mean"].agg(mean_bench="mean", std_bench="std").reset_index()
+    overall = (
+        gday.groupby("day_rel")["hour_mean"].mean().agg(["mean","std"])
+    ).rename({"mean":"mean_bench","std":"std_bench"}).to_frame().T
+    overall["group"] = "Overall"
+    return pd.concat([gbench, overall], ignore_index=True).set_index("group")
+
+bench_close = compute_benchmarks(close_hr, *BENCH_WIN)
+bench_open  = compute_benchmarks(open_hr,  *BENCH_WIN)
+
+# ---------- STANDARDIZATION ----------
+def standardize(hr_df, lo, hi, kind):
+    z = hr_df[hr_df["day_rel"].between(lo, hi)].copy()
+    b = bench_close if kind=="close" else bench_open
+    z = z.merge(b, left_on="group", right_index=True, how="left")
+    for col in ["mean_bench","std_bench"]:
+        z[col] = z[col].fillna(b.loc["Overall", col])
+    z["z"] = (z["hour_mean"] - z["mean_bench"]) / z["std_bench"].replace(0, np.nan)
+    return z[["ric","group","day_rel","z"]]
+
+z_pre  = standardize(close_hr, *PRE_WIN,  "close")
+z_post = standardize(open_hr,  *POST_WIN, "open")
+z_all  = pd.concat([z_pre, z_post], ignore_index=True)
+
+# ---------- WINSORIZATION ----------
+# Change limits here to adjust:
+LOW_PCT, HIGH_PCT = 2.5, 97.5       # current = 0.1–99.9
+# e.g. set to (1, 99) for 1–99 % or (0.5, 99.5) for 0.5–99.5 %
+low, high = np.nanpercentile(z_all["z"], [LOW_PCT, HIGH_PCT])
+z_all["z"] = z_all["z"].clip(lower=low, upper=high)
+
+
+# ============================================================
+# ===  T-TEST: Nearby vs Distant for each day_rel in DAYS  ===
+# ============================================================
+
+from scipy.stats import ttest_ind
+
+t_results = []
+
+for d in DAYS:
+    sub = z_all[z_all["day_rel"] == d]
+
+    near = sub[sub["group"] == "Nearby"]["z"].dropna()
+    dist = sub[sub["group"] == "Distant"]["z"].dropna()
+
+    if len(near) < 3 or len(dist) < 3:
+        t_results.append({
+            "day_rel": d,
+            "mean_near": np.nan,
+            "mean_dist": np.nan,
+            "diff": np.nan,
+            "t_stat": np.nan,
+            "p_val": np.nan,
+            "sig": ""
+        })
+        continue
+
+    # Welch unequal-variance t-test
+    t_stat, p_val = ttest_ind(near, dist, equal_var=False)
+
+    diff = near.mean() - dist.mean()
+
+    # significance stars
+    if p_val < 0.01: sig = "***"
+    elif p_val < 0.05: sig = "**"
+    elif p_val < 0.10: sig = "*"
+    else: sig = ""
+
+    t_results.append({
+        "day_rel": d,
+        "mean_near": near.mean(),
+        "mean_dist": dist.mean(),
+        "diff": diff,
+        "t_stat": t_stat,
+        "p_val": p_val,
+        "sig": sig
+    })
+
+# Put results in a table
+t_table = pd.DataFrame(t_results)
+
+# ============================================================
+# = Create LaTeX Table 
+# ============================================================
+
+latex_path = OUT_DIR2 / "ttest_10.tex"
+
+# Work on a copy
+tab = t_table.copy()
+
+# Round values
+def fmt(x):
+    return f"{x:.2f}" if pd.notnull(x) else ""
+
+tab["mean_near_f"] = tab["mean_near"].apply(fmt)
+tab["mean_dist_f"] = tab["mean_dist"].apply(fmt)
+tab["diff_f"]      = tab["diff"].apply(fmt)
+tab["t_stat_f"]    = tab["t_stat"].apply(fmt)
+
+# Add stars to t-stat (based on p-val)
+def add_stars(row):
+    if pd.isnull(row["p_val"]):
+        return ""
+    if row["p_val"] < 0.01:
+        return row["t_stat_f"] + "***"
+    elif row["p_val"] < 0.05:
+        return row["t_stat_f"] + "**"
+    elif row["p_val"] < 0.10:
+        return row["t_stat_f"] + "*"
+    else:
+        return row["t_stat_f"]
+
+tab["t_stat_star"] = tab.apply(add_stars, axis=1)
+
+# Build LaTeX
+with open(latex_path, "w") as f:
+    f.write("\\begin{table}[ht]\n")
+    f.write("\\centering\n")
+    f.write("\\caption{Difference in Standardized Abnormal Quoted Spread: Nearby vs.\ Distant}\n")
+    f.write("\\label{tab:ttest_psm}\n")
+    f.write("\\vspace{0.5em}\n")
+    
+    f.write("\\begin{tabular}{lcccc}\n")
+    f.write("\\toprule\n")
+    f.write("Day & Nearby & Distant & Difference & $t$-statistic \\\\\n")
+    f.write("\\midrule\n")
+    
+    for _, r in tab.iterrows():
+        f.write(
+            f"{int(r['day_rel']):+d} & "
+            f"{r['mean_near_f']} & "
+            f"{r['mean_dist_f']} & "
+            f"{r['diff_f']} & "
+            f"{r['t_stat_star']} \\\\\n"
+        )
+    
+    f.write("\\midrule\n")
+    f.write("\\multicolumn{5}{l}{\\footnotesize Notes: Welch unequal-variance $t$-tests.}\\\\\n")
+    f.write("\\multicolumn{5}{l}{\\footnotesize $^{***}p<0.01$, $^{**}p<0.05$, $^{*}p<0.10$.}\\\\\n")
+    f.write("\\bottomrule\n")
+    f.write("\\end{tabular}\n")
+    f.write("\\end{table}\n")
+
+print(f"Saved LaTeX table → {latex_path}")
+
+# Pretty print
+print("\n================= T-TEST: Nearby − Distant =================")
+print(t_table.to_string(index=False,
+                        formatters={
+                            "mean_near": "{:.4f}".format,
+                            "mean_dist": "{:.4f}".format,
+                            "diff": "{:.4f}".format,
+                            "t_stat": "{:.3f}".format,
+                            "p_val": "{:.3f}".format
+                        }))
+print("============================================================\n")
+
+# Optionally save to CSV
+t_table.to_csv(OUT_DIR2 / "ttest_10.csv", index=False)
+print(f"Saved t-test table → {OUT_DIR2/'ttest_10.csv'}")
+
 
 # ---------- STYLE ----------
 plt.rcParams.update({
-    "text.usetex": False,
-    "font.family": "serif",
-    "font.serif": ["Times New Roman", "Computer Modern Roman", "DejaVu Serif"],
-    "font.size": 12,
-    "axes.labelsize": 12,
-    "legend.fontsize": 11,
-    "xtick.labelsize": 11,
-    "ytick.labelsize": 11,
-    "axes.linewidth": 0.7,
-    "figure.dpi": 300,
+ "font.family":"serif",
+ "font.serif":["Times New Roman","DejaVu Serif"],
+ "font.size":11.5,
+ "axes.linewidth":0.9,
+ "figure.dpi":300
 })
+def style(ax):
+    ax.grid(True, alpha=.25)
+    for s in ax.spines.values():
+        s.set_visible(True); s.set_linewidth(.9); s.set_color("black")
 
-def _style_axes(ax):
-    ax.grid(True, alpha=0.25)
-    for sp in ax.spines.values():
-        sp.set_visible(True)
-        sp.set_linewidth(0.7)
-        sp.set_color("black")
+# ---------- GROUP CI (90%) ----------
+def fig_group_ci_90():
+    fig, ax = plt.subplots(figsize=(5.4,4.8))
+    offset = 0.15
+    crit = 1.645  # 90% CI
+    marker_styles = {"Nearby":("o","red"), "Distant":("^","blue")}
 
-# ---------- CI COMPUTATION ----------
-def compute_ci(df_in, var):
-    stats = (
-        df_in.groupby(["datetime", "sample_label"])[var]
-        .agg(["mean", "std", "count"])
-        .reset_index()
-    )
-    stats["se"] = stats["std"] / np.sqrt(stats["count"])
-    stats["ci95"] = 1.96 * stats["se"]
-    stats["lower"] = stats["mean"] - stats["ci95"]
-    stats["upper"] = stats["mean"] + stats["ci95"]
-    return stats.dropna(subset=["mean"])
+    for grp,(marker,color) in marker_styles.items():
+        g = (z_all[z_all["group"]==grp]
+             .groupby("day_rel")["z"]
+             .agg(mean="mean",std="std",n="count")
+             .reindex(DAYS).reset_index())
+        g["se"] = g["std"]/np.sqrt(g["n"].where(g["n"]>0,np.nan))
+        g["ci"] = crit * g["se"]
+        g["lo"], g["hi"] = g["mean"]-g["ci"], g["mean"]+g["ci"]
+        g["sig"] = (g["lo"]>0)|(g["hi"]<0)
+        x = np.array(DAYS) + (offset if grp=="Nearby" else -offset)
+        ax.errorbar(x, g["mean"], yerr=g["ci"], fmt="none",
+                    ecolor=color, elinewidth=1.1, capsize=1.5)
+        for xi,m,sig in zip(x,g["mean"],g["sig"]):
+            if np.isfinite(m):
+                face=color if sig else "white"
+                ax.scatter([xi],[m],facecolors=face,edgecolors=color,
+                           marker=marker,s=20,zorder=3)
 
-# ---------- A) FIVE TRADING DAYS (–5…+5) ----------
-def plot_five_trading_days(var, ylabel):
-    dsub = df[(df["days_from_event"] >= -5) & (df["days_from_event"] <= 5)].dropna(subset=[var])
-    if dsub.empty: return
-    stats = compute_ci(dsub, var)
-    if stats.empty: return
+    # axis styling
+    ax.axhline(0, color="gray", lw=1.0, ls="--")
+    ax.axvline(0, color="green", ls="--", lw=1.0)
+    ax.set_xticks(DAYS)
+    ax.set_xticklabels([str(d) for d in DAYS])
+    ax.set_xlim(min(DAYS)-0.8, max(DAYS)+0.8)
+    ax.set_xlabel("Trading Days Around Conflict Onset")
+    ax.set_ylabel("Standardized Abnormal Quoted Spread (z)")
+    style(ax)
 
-    fig, ax = plt.subplots(figsize=(6.4, 3.8))
+    # legend
+    handles=[
+        Line2D([0],[0],marker="o",color="red",lw=0,label="Nearby",markerfacecolor="red"),
+        Line2D([0],[0],marker="^",color="blue",lw=0,label="Distant",markerfacecolor="blue")
+    ]
+    ax.legend(handles=handles,frameon=True,facecolor="white",
+              edgecolor="gray",framealpha=.8,loc="best")
 
-    # Distant (blue dotted)
-    g = stats[stats["sample_label"] == "Distant"]
-    if not g.empty:
-        ax.plot(g["datetime"], g["mean"], color="blue", linewidth=1.3, linestyle="--", label="Distant")
-        ax.fill_between(g["datetime"], g["lower"], g["upper"], color="blue", alpha=0.2)
-
-    # Nearby (red solid)
-    g = stats[stats["sample_label"] == "Nearby"]
-    if not g.empty:
-        ax.plot(g["datetime"], g["mean"], color="red", linewidth=1.3, label="Nearby")
-        ax.fill_between(g["datetime"], g["lower"], g["upper"], color="red", alpha=0.2)
-
-    ax.axvline(event_day, color="green", linestyle="--", linewidth=1)
-    ax.axvspan(event_day, stats["datetime"].max(), color="green", alpha=0.1)
-    ax.set_title('First-/Second-degree Neighbours (54 firms)', fontsize=14, fontweight='bold')
-    ax.set_xlabel("UTC Datetime")
-    ax.set_ylabel(ylabel)
-    ax.legend(frameon=True, facecolor="white", edgecolor="gray", framealpha=0.5, loc="best")
-    _style_axes(ax)
-
-    fig.autofmt_xdate()
     fig.tight_layout()
-    plt.savefig(OUT_FIVE / f"{var}_mean_ci.png", dpi=300, bbox_inches="tight")
+    plt.savefig(OUT_DIR/"ci_dist.png",dpi=300,bbox_inches="tight")
     plt.close()
 
-# ---------- B) BOUNDARY POINTS ----------
-def plot_boundary_points(var, ylabel):
-    if "ric" not in df.columns: return
-    prev_day = df[df["days_from_event"] == -1].dropna(subset=[var])
-    day0     = df[df["days_from_event"] == 0 ].dropna(subset=[var])
-    if prev_day.empty or day0.empty: return
-
-    idx_last = prev_day.groupby("ric")["datetime"].idxmax()
-    idx_first = day0.groupby("ric")["datetime"].idxmin()
-    prev_last = prev_day.loc[idx_last]
-    day0_first = day0.loc[idx_first]
-    both_days = pd.concat([prev_last, day0_first], ignore_index=True)
-
-    fig, ax = plt.subplots(figsize=(6.4, 3.8))
-
-    # Filled markers only, one per sample group
-    ax.scatter(both_days.loc[both_days["sample_label"]=="Distant", "datetime"],
-               both_days.loc[both_days["sample_label"]=="Distant", var],
-               s=16, marker="^", color="blue", alpha=0.7, label="Distant")
-    ax.scatter(both_days.loc[both_days["sample_label"]=="Nearby", "datetime"],
-               both_days.loc[both_days["sample_label"]=="Nearby", var],
-               s=16, marker="o", color="red", alpha=0.7, label="Nearby")
-
-    ax.axvline(event_day, color="green", linestyle="--", linewidth=1)
-    ax.set_title('First-/Second-degree Neighbours (54 firms)', fontsize=14, fontweight='bold')
-    ax.set_xlabel("UTC Datetime")
-    ax.set_ylabel(ylabel)
-    ax.legend(frameon=True, facecolor="white", edgecolor="gray", framealpha=0.6, loc="best")
-    _style_axes(ax)
-
-    fig.autofmt_xdate()
+# ---------- OVERALL CI (shaded) ----------
+def fig_overall_ci():
+    g=(z_all.groupby("day_rel")["z"]
+        .agg(mean="mean",std="std",n="count")
+        .reindex(DAYS).reset_index())
+    g["se"]=g["std"]/np.sqrt(g["n"].where(g["n"]>0,np.nan))
+    g["ci"]=1.645*g["se"]
+    g["lo"],g["hi"]=g["mean"]-g["ci"],g["mean"]+g["ci"]
+    g["sig"]=(g["lo"]>0)|(g["hi"]<0)
+    x=np.array(DAYS)
+    fig,ax=plt.subplots(figsize=(5.4,4.8))
+    ax.fill_between(x,g["lo"],g["hi"],color="black",alpha=.12)
+    ax.plot(x,g["mean"],color="black",lw=1.2,zorder=1)
+    for xi,m,s in zip(x,g["mean"],g["sig"]):
+        if np.isfinite(m):
+            if s: ax.scatter([xi],[m],color="black",s=35)
+            else: ax.scatter([xi],[m],facecolors="white",edgecolors="black",s=35)
+    ax.axhline(0,color="gray",lw=1.0,ls="--")
+    ax.axvline(0,color="green",ls="--",lw=1.0)
+    ax.set_xticks(DAYS)
+    ax.set_xticklabels([str(d) for d in DAYS])
+    ax.set_xlim(min(DAYS)-0.8,max(DAYS)+0.8)
+    ax.set_xlabel("Trading Days Around Conflict Onset")
+    ax.set_ylabel("Standardized Abnormal Quoted Spread (z)")
+    style(ax)
+    h=[
+        Line2D([0],[0],color="black",lw=1.1,label="mean"),
+        Patch(facecolor="black",alpha=.12,label="90% CI"),
+        Line2D([0],[0],marker="o",color="black",lw=0,label="significant",mfc="black"),
+        Line2D([0],[0],marker="o",mfc="white",mec="black",lw=0,label="not significant")
+    ]
+    ax.legend(handles=h,frameon=True,facecolor="white",edgecolor="gray",framealpha=.8,loc="best")
     fig.tight_layout()
-    plt.savefig(OUT_BOUND / f"{var}_boundary.png", dpi=300, bbox_inches="tight")
+    plt.savefig(OUT_DIR/"ci_all.png",dpi=300,bbox_inches="tight")
+    plt.close()
+# ================================================================
+# === SHADED CI PLOT FOR NEARBY − DISTANT DIFFERENCE (OVERALL STYLE)
+# ================================================================
+
+def fig_difference_ci_90():
+    # Welch SE from t-tests: SE = |diff / t_stat|
+    g = t_table.copy()
+    g["SE"] = np.abs(g["diff"] / g["t_stat"])
+    g.loc[g["SE"].isna(), "SE"] = np.nan
+
+    # 90% CI
+    g["CI"] = 1.645 * g["SE"]
+    g["lo"] = g["diff"] - g["CI"]
+    g["hi"] = g["diff"] + g["CI"]
+
+    x = np.array(g["day_rel"])
+
+    fig, ax = plt.subplots(figsize=(5.4,4.8))
+
+    # Shaded 90% CI (same as overall)
+    ax.fill_between(x, g["lo"], g["hi"], color="black", alpha=.12)
+
+    # Difference line
+    ax.plot(x, g["diff"], color="black", lw=1.2, zorder=2)
+
+    # Markers: filled if significant else hollow
+    for xi, m, sig in zip(x, g["diff"], g["sig"]):
+        if np.isfinite(m):
+            if sig in ["*","**","***"]:
+                ax.scatter([xi], [m], color="black", s=35, zorder=3)
+            else:
+                ax.scatter([xi], [m], facecolors="white", edgecolors="black",
+                           s=35, zorder=3)
+
+    # Baseline styling (same as overall)
+    ax.axhline(0, color="gray", lw=1.0, ls="--")
+    ax.axvline(0, color="green", lw=1.0, ls="--")
+
+    ax.set_xticks(DAYS)
+    ax.set_xticklabels([str(d) for d in DAYS])
+    ax.set_xlim(min(DAYS)-0.8, max(DAYS)+0.8)
+    ax.set_xlabel("Trading Days Around Conflict Onset")
+    ax.set_ylabel("Difference in Standardized Quoted Spread (z)")
+
+    style(ax)
+
+    # Legend (same structure as overall plot)
+    handles = [
+        Line2D([0],[0], color="black", lw=1.1, label="Nearby − Distant"),
+        Patch(facecolor="black", alpha=.12, label="90% CI"),
+        Line2D([0],[0], marker="o", color="black", lw=0,
+               label="significant", markerfacecolor="black"),
+        Line2D([0],[0], marker="o", lw=0, label="not significant",
+               markerfacecolor="white", markeredgecolor="black")
+    ]
+    ax.legend(handles=handles, frameon=True, facecolor="white",
+              edgecolor="gray", framealpha=.8, loc="best")
+
+    fig.tight_layout()
+    plt.savefig(OUT_DIR / "ci_difference.png",
+                dpi=300, bbox_inches="tight")
     plt.close()
 
-# ---------- C) ±24 HOURS AROUND 03:59 UTC ----------
-def plot_around_0359(var, ylabel):
-    t0 = pd.Timestamp("2022-02-24 03:59:00+00:00")
-    t1, t2 = t0 - pd.Timedelta(hours=24), t0 + pd.Timedelta(hours=24)
-    dsub = df[(df["datetime"] >= t1) & (df["datetime"] <= t2)].dropna(subset=[var])
-    if dsub.empty: return
-    stats = compute_ci(dsub, var)
-    if stats.empty: return
+    print("Saved difference shaded plot → ci_difference.png")
 
-    fig, ax = plt.subplots(figsize=(7.2, 3.8))
-
-    # Distant (blue dotted)
-    g = stats[stats["sample_label"] == "Distant"]
-    if not g.empty:
-        ax.plot(g["datetime"], g["mean"], color="blue", linewidth=1.3, linestyle="--", label="Distant (mean)")
-        ax.fill_between(g["datetime"], g["lower"], g["upper"], color="blue", alpha=0.2)
-
-    # Nearby (red solid)
-    g = stats[stats["sample_label"] == "Nearby"]
-    if not g.empty:
-        ax.plot(g["datetime"], g["mean"], color="red", linewidth=1.3, label="Nearby (mean)")
-        ax.fill_between(g["datetime"], g["lower"], g["upper"], color="red", alpha=0.2)
-
-    ax.axvline(t0, color="green", linestyle="--", linewidth=1)
-    ax.axvspan(t0, t2, color="green", alpha=0.1)
-    ax.set_title('First-/Second-degree Neighbours (54 firms)', fontsize=14, fontweight='bold')
-    ax.set_xlabel("UTC Datetime")
-    ax.set_ylabel(ylabel)
-    ax.legend(frameon=True, facecolor="white", edgecolor="gray", framealpha=0.5, loc="best")
-    _style_axes(ax)
-
-    fig.autofmt_xdate()
-    fig.tight_layout()
-    plt.savefig(OUT_24H / f"{var}_mean_ci.png", dpi=300, bbox_inches="tight")
-    plt.close()
-
-# ---------- LABELS ----------
-y_labels = {
-    "qspread_mean": "Quoted Spread (%)",
-    "espread_mean": "Effective Spread (%)",
-    "trades_count": "Number of Trades (log)",
-    "dollar_volume_sum": "Dollar Volume (log)",
-    "intraday_5m_vol_mean": "Intraday Volatility (5-minute)",
-    "intraday_vol_mean": "Intraday Volatility (open-close)"
-}
 
 # ---------- RUN ----------
-for var in vars_to_plot:
-    if var not in df.columns:
-        print(f"Skipping missing variable: {var}")
-        continue
-    ylabel = y_labels.get(var, var)
-    plot_five_trading_days(var, ylabel)
-    plot_boundary_points(var, ylabel)
-    plot_around_0359(var, ylabel)
-
-print(f"\n✅ All CI plots saved under {OUT_BASE}")
+fig_group_ci_90()
+fig_overall_ci()
+fig_difference_ci_90()
+print(f"✅ 90% CI figures saved to: {OUT_DIR}")

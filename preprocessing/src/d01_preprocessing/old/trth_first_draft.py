@@ -75,7 +75,7 @@ def add_future_refs(group: pd.DataFrame) -> pd.DataFrame:
     dt = group["datetime"].to_numpy(dtype="datetime64[ns]")
     target = (group["datetime"] + pd.Timedelta(minutes=5)).to_numpy(dtype="datetime64[ns]")
 
-    idx = np.searchsorted(dt, target, side="right") + 1
+    idx = np.searchsorted(dt, target, side="right") - 1
     valid = (idx >= 0) & (idx < len(dt))
 
     mid_ref = group["mid_ref"].to_numpy(dtype="float64", copy=False)

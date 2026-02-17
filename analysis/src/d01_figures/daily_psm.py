@@ -7,7 +7,7 @@ from datetime import date
 # ---------- PATHS ----------
 DATA_ROOT   = Path(__file__).resolve().parents[2] / "data"
 OUTPUT_ROOT = Path(__file__).resolve().parents[2] / "output"
-DAILY       = DATA_ROOT / "daily_balanced_psm.csv"
+DAILY       = DATA_ROOT / "daily_balanced.csv"
 OUT_DAILY   = OUTPUT_ROOT / "daily" / "figures"
 OUT_DAILY.mkdir(parents=True, exist_ok=True)
 
@@ -35,6 +35,8 @@ df["days_from_event"] = df["trading_day_index"] - event_trading_index
 
 # ---------- LABEL GROUPS ----------
 label_map = {1: "Nearby", 0: "Distant"}
+df["psm_group"] = pd.to_numeric(df["psm_group"], errors="coerce")
+df = df[df["psm_group"].isin([0, 1])].copy()
 df["sample_label"] = df["psm_group"].map(label_map)
 
 # ---------- VARIABLES ----------

@@ -57,6 +57,7 @@ DEFAULT_PARQUET_COMPRESSION = "snappy"
 DEFAULT_PARQUET_MAX_ROWS = 1_000_000
 LOWER_WINSOR_Q = 0.001
 UPPER_WINSOR_Q = 0.9999
+PRICE_OUTLIER_ZSCORE = 3.0
 
 # ---------- FOLDER STRUCTURE ----------
 DATA_ROOT = Path(__file__).resolve().parents[2] / "data"
@@ -342,29 +343,52 @@ def _process_shard_folder_polars_worker(args):
     shard_dir, tmp_format = args
     return shard_dir, process_shard_folder_polars(shard_dir, tmp_format)
 
-def add_future_refs(group: pd.DataFrame) -> pd.DataFrame:
-    """Per (ric, day): mid_ref_future & w_mid_ref_future = last ref at or before t+5m."""
-    if not pd.api.types.is_datetime64_any_dtype(group["datetime"]):
-        group["datetime"] = pd.to_datetime(group["datetime"], errors="coerce", utc=True)
+def add_future_refs(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute future references on trades with merge_asof at target=t+5m by (ric, date_local)."""
+    if df.empty:
+        df["mid_ref_future"] = np.nan
+        df["w_mid_ref_future"] = np.nan
+        return df
 
-    dt = group["datetime"].to_numpy(dtype="datetime64[ns]")
-    target = (group["datetime"] + pd.Timedelta(minutes=5)).to_numpy(dtype="datetime64[ns]")
+    if not pd.api.types.is_datetime64_any_dtype(df["datetime"]):
+        df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce", utc=True)
 
-    idx = np.searchsorted(dt, target, side="right") + 1
-    valid = (idx >= 0) & (idx < len(dt))
+    df["mid_ref_future"] = np.nan
+    df["w_mid_ref_future"] = np.nan
 
-    mid_ref = group["mid_ref"].to_numpy(dtype="float64", copy=False)
-    w_mid_ref = group["w_mid_ref"].to_numpy(dtype="float64", copy=False)
+    trades = df.loc[df["is_trade"] & df["datetime"].notna(), ["ric", "date_local", "datetime"]].copy()
+    if trades.empty:
+        return df
 
-    mid_ref_future = np.full(len(dt), np.nan)
-    w_mid_ref_future = np.full(len(dt), np.nan)
+    trades["target"] = trades["datetime"] + pd.Timedelta(minutes=5)
+    trades["_row_id"] = trades.index.to_numpy(dtype=np.int64)
 
-    mid_ref_future[valid] = mid_ref[idx[valid]]
-    w_mid_ref_future[valid] = w_mid_ref[idx[valid]]
+    mids = df.loc[df["datetime"].notna(), ["ric", "date_local", "datetime", "mid_ref", "w_mid_ref"]].copy()
+    mids = mids.rename(
+        columns={
+            "datetime": "datetime_ref",
+            "mid_ref": "mid_ref_future",
+            "w_mid_ref": "w_mid_ref_future",
+        }
+    )
 
-    group["mid_ref_future"]  = mid_ref_future
-    group["w_mid_ref_future"] = w_mid_ref_future
-    return group
+    trades = trades.sort_values(["ric", "date_local", "target", "_row_id"], kind="mergesort")
+    mids = mids.sort_values(["ric", "date_local", "datetime_ref"], kind="mergesort")
+
+    merged = pd.merge_asof(
+        trades,
+        mids,
+        left_on="target",
+        right_on="datetime_ref",
+        by=["ric", "date_local"],
+        direction="backward",
+        allow_exact_matches=True,
+    )
+    row_ids = merged["_row_id"].to_numpy(dtype=np.int64)
+    df.loc[row_ids, "mid_ref_future"] = merged["mid_ref_future"].to_numpy()
+    df.loc[row_ids, "w_mid_ref_future"] = merged["w_mid_ref_future"].to_numpy()
+
+    return df
 
 # ---------- PHASE 1 : stream & shard (CSV.GZ or Parquet) ----------
 def stage_phase_one(
@@ -630,6 +654,19 @@ def process_shard_folder(shard_dir: Path, tmp_format: str) -> pd.DataFrame:
     # direction
     df["prev_mid_ref"] = df.groupby(["ric","date_local"])["mid_ref"].shift(1)
     df["direction"] = np.vectorize(compute_direction)(df["price"], df["prev_mid_ref"])
+    # Outlier trades (3-sigma within ric x local day) only affect signed PI direction.
+    trade_price = df["price"].where(df["is_trade"])
+    grp = [df["ric"], df["date_local"]]
+    trade_px_mean = trade_price.groupby(grp).transform("mean")
+    trade_px_std = trade_price.groupby(grp).transform("std")
+    trade_price_outlier = (
+        df["is_trade"]
+        & df["price"].notna()
+        & trade_px_std.notna()
+        & (trade_px_std > 0)
+        & ((df["price"] - trade_px_mean).abs() > PRICE_OUTLIER_ZSCORE * trade_px_std)
+    )
+    direction_for_pi = df["direction"].where(~trade_price_outlier)
 
     # quoted spread
     df["q_spread"] = np.where(df["is_quote"] & df["mid"].notna(),
@@ -642,7 +679,7 @@ def process_shard_folder(shard_dir: Path, tmp_format: str) -> pd.DataFrame:
                                2 * df["e_spread"] * df["direction"], np.nan)
 
     # future refs
-    df = df.groupby(["ric","date_local"], group_keys=False).apply(add_future_refs)
+    df = add_future_refs(df)
 
     # price impacts
     df["price_impact"] = np.where(
@@ -650,9 +687,12 @@ def process_shard_folder(shard_dir: Path, tmp_format: str) -> pd.DataFrame:
         (df["mid_ref_future"] - df["mid_ref"]) / df["mid_ref"],
         np.nan
     )
-    df["price_impact2"] = np.where(df["price_impact"].notna(),
-                                   2 * df["direction"] * df["price_impact"], np.nan)
-    df.loc[df["direction"] == 0, ["direction","price_impact2"]] = np.nan
+    df["price_impact2"] = np.where(
+        df["price_impact"].notna() & direction_for_pi.notna(),
+        2 * direction_for_pi * df["price_impact"],
+        np.nan
+    )
+    df.loc[direction_for_pi == 0, "price_impact2"] = np.nan
 
     # weighted versions
     df["w_e_spread2"] = np.where(
@@ -661,10 +701,11 @@ def process_shard_folder(shard_dir: Path, tmp_format: str) -> pd.DataFrame:
         np.nan
     )
     df["w_price_impact2"] = np.where(
-        df["is_trade"] & df["w_mid_ref"].notna() & df["w_mid_ref_future"].notna() & df["direction"].notna(),
-        2 * df["direction"] * ((df["w_mid_ref_future"] - df["w_mid_ref"]) / df["w_mid_ref"]),
+        df["is_trade"] & df["w_mid_ref"].notna() & df["w_mid_ref_future"].notna() & direction_for_pi.notna(),
+        2 * direction_for_pi * ((df["w_mid_ref_future"] - df["w_mid_ref"]) / df["w_mid_ref"]),
         np.nan
     )
+    df.loc[direction_for_pi == 0, "w_price_impact2"] = np.nan
 
     # log returns (only compute when both current and previous prices are > 0)
     p = df.groupby("ric", group_keys=False)["price"].apply(
@@ -761,23 +802,38 @@ def _winsorize_expr(col: str):
 def process_shard_folder_polars(shard_dir: Path, tmp_format: str) -> "pl.DataFrame":
     """Polars version of Phase 2 processing for one ric/day shard."""
     _require_polars()
-    if tmp_format != "parquet":
-        raise ValueError("Polars engine requires --temp-format parquet.")
-
-    files = sorted(shard_dir.glob("*.parquet"))
-    if not files:
-        return pl.DataFrame()
-
-    try:
-        df = pl.read_parquet([str(f) for f in files])
-    except Exception:
-        df = pl.read_parquet(str(shard_dir / "*.parquet"))
+    if tmp_format == "parquet":
+        files = sorted(shard_dir.glob("*.parquet"))
+        if not files:
+            return pl.DataFrame()
+        try:
+            df = pl.read_parquet([str(f) for f in files])
+        except Exception:
+            df = pl.read_parquet(str(shard_dir / "*.parquet"))
+        dt_expr = pl.col("datetime").cast(pl.Datetime, strict=False)
+    elif tmp_format == "csv":
+        files = sorted(shard_dir.glob("*.csv.gz"))
+        if not files:
+            return pl.DataFrame()
+        try:
+            df = pl.concat(
+                [pl.read_csv(str(f), infer_schema_length=1000) for f in files],
+                how="vertical_relaxed",
+                rechunk=True,
+            )
+        except Exception:
+            return pl.DataFrame()
+        dt_expr = pl.col("datetime").cast(pl.Utf8, strict=False).str.strptime(
+            pl.Datetime, format="%Y-%m-%d %H:%M:%S%.f%z", strict=False
+        )
+    else:
+        raise ValueError(f"Unsupported temp format for polars: {tmp_format}")
 
     if df.height == 0:
         return df
 
     df = df.with_columns(
-        pl.col("datetime").cast(pl.Datetime, strict=False),
+        dt_expr.alias("datetime"),
         pl.col("price").cast(pl.Float64, strict=False),
         pl.col("bid").cast(pl.Float64, strict=False),
         pl.col("ask").cast(pl.Float64, strict=False),
@@ -843,6 +899,23 @@ def process_shard_folder_polars(shard_dir: Path, tmp_format: str) -> "pl.DataFra
         .otherwise(0)
     )
     df = df.with_columns(direction.alias("direction"))
+    trade_price_expr = pl.when(pl.col("is_trade") == True).then(pl.col("price")).otherwise(None)
+    df = df.with_columns(
+        trade_price_expr.mean().over(["ric", "date_local"]).alias("trade_price_day_mean"),
+        trade_price_expr.std(ddof=1).over(["ric", "date_local"]).alias("trade_price_day_std"),
+    )
+    df = df.with_columns(
+        pl.when(
+            (pl.col("is_trade") == True)
+            & pl.col("price").is_not_null()
+            & pl.col("trade_price_day_std").is_not_null()
+            & (pl.col("trade_price_day_std") > 0)
+            & ((pl.col("price") - pl.col("trade_price_day_mean")).abs() > PRICE_OUTLIER_ZSCORE * pl.col("trade_price_day_std"))
+        )
+        .then(None)
+        .otherwise(pl.col("direction"))
+        .alias("direction_for_pi")
+    )
 
     df = df.with_columns(
         pl.when((pl.col("is_quote") == True) & pl.col("mid").is_not_null())
@@ -888,14 +961,13 @@ def process_shard_folder_polars(shard_dir: Path, tmp_format: str) -> "pl.DataFra
         .alias("price_impact")
     )
     df = df.with_columns(
-        pl.when(pl.col("price_impact").is_not_null())
-        .then(2 * pl.col("direction") * pl.col("price_impact"))
+        pl.when(pl.col("price_impact").is_not_null() & pl.col("direction_for_pi").is_not_null())
+        .then(2 * pl.col("direction_for_pi") * pl.col("price_impact"))
         .otherwise(None)
         .alias("price_impact2")
     )
     df = df.with_columns(
-        pl.when(pl.col("direction") == 0).then(None).otherwise(pl.col("direction")).alias("direction"),
-        pl.when(pl.col("direction") == 0).then(None).otherwise(pl.col("price_impact2")).alias("price_impact2"),
+        pl.when(pl.col("direction_for_pi") == 0).then(None).otherwise(pl.col("price_impact2")).alias("price_impact2"),
     )
 
     df = df.with_columns(
@@ -914,9 +986,9 @@ def process_shard_folder_polars(shard_dir: Path, tmp_format: str) -> "pl.DataFra
             (pl.col("is_trade") == True)
             & pl.col("w_mid_ref").is_not_null()
             & pl.col("w_mid_ref_future").is_not_null()
-            & pl.col("direction").is_not_null()
+            & pl.col("direction_for_pi").is_not_null()
         )
-        .then(2 * pl.col("direction") * ((pl.col("w_mid_ref_future") - pl.col("w_mid_ref")) / pl.col("w_mid_ref")))
+        .then(2 * pl.col("direction_for_pi") * ((pl.col("w_mid_ref_future") - pl.col("w_mid_ref")) / pl.col("w_mid_ref")))
         .otherwise(None)
         .alias("w_price_impact2")
     )
@@ -955,7 +1027,7 @@ def process_shard_folder_polars(shard_dir: Path, tmp_format: str) -> "pl.DataFra
     )
 
     df = df.with_columns(
-        pl.col("datetime").dt.floor("5m").alias("dt_5m")
+        pl.col("datetime").dt.truncate("5m").alias("dt_5m")
     )
     price_trade = pl.when(pl.col("is_trade") == True).then(pl.col("price")).otherwise(None)
     df = df.with_columns(
@@ -971,7 +1043,7 @@ def process_shard_folder_polars(shard_dir: Path, tmp_format: str) -> "pl.DataFra
     df = df.with_columns([_winsorize_expr(c) for c in winsor_cols])
 
     agg = (
-        df.groupby(["ric", "dt_5m", "date_local"])
+        df.group_by(["ric", "dt_5m", "date_local"])
           .agg(
               pl.col("price").mean().alias("price_mean"),
               pl.col("volume").mean().alias("volume_mean"),
@@ -1160,9 +1232,8 @@ def main():
             _require_pyarrow()
         if args.engine == "polars":
             _require_polars()
-            _require_pyarrow()
-            if args.temp_format != "parquet":
-                raise ValueError("Polars engine requires --temp-format parquet.")
+            if args.temp_format == "parquet" or args.output_format == "parquet":
+                _require_pyarrow()
 
         parquet_partition_cols = _parse_partition_cols(args.temp_partition_cols)
         if args.temp_format == "parquet" and not parquet_partition_cols:
@@ -1202,7 +1273,7 @@ def main():
             log(f"▶ Processing {gz.name} (streamed, two-phase)")
 
             with timed(f"Phase 1 total ({gz.name})", args.timings):
-                if args.engine == "polars":
+                if args.engine == "polars" and args.temp_format == "parquet":
                     staged_root = stage_phase_one_polars(
                         gz,
                         TMP_DIR,

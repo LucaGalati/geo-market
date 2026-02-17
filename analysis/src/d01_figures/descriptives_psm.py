@@ -14,7 +14,7 @@ ROOT        = Path(__file__).resolve().parents[2]
 DATA_ROOT   = ROOT / "data"
 OUTPUT_ROOT = ROOT / "output"
 
-DAILY       = DATA_ROOT / "daily_balanced_psm.csv"
+DAILY       = DATA_ROOT / "daily_balanced.csv"
 OUT_DIR     = OUTPUT_ROOT / "map" /"psm"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
