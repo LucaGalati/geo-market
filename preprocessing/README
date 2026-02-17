@@ -3,6 +3,13 @@ Run master.py to gather and prepare data to generate files necessary for R analy
 For TRTH preprocessing directly:
   python src/d01_preprocessing/trth_streamed.py [file.gz] --timings --phase2-workers 4
   python src/d01_preprocessing/trth_streamed.py --temp-format parquet --output-format parquet
+  python src/d01_preprocessing/trth_streamed.py --engine polars --temp-format parquet --output-format parquet
+
+Notes:
+- Polars engine requires `polars` and `pyarrow` installed, and uses Parquet temp shards.
+- Use `--auto-tune` to adjust chunk size, Phase 2 workers, and Parquet row groups based on RAM/CPU.
+- Use `--generate-sample` to create and process a small synthetic TRTH .csv.gz for testing.
+  Optional: `--sample-days 5 --sample-start-date 2023-01-02 --sample-rics 3`
 
 
 Tested on Dec 1, 2025

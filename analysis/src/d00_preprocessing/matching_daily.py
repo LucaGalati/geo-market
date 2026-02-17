@@ -10,7 +10,7 @@ from sklearn.preprocessing import StandardScaler
 # ---------- PATHS ----------
 ROOT = Path(__file__).resolve().parents[2]
 IN1  = ROOT / "data" / "daily_balanced.csv"
-OUT_MATCHED = ROOT / "data" / "daily_matched_psm.csv"
+OUT_MATCHED = ROOT / "data" / "daily_balanced_psm.csv"
 OUT_UPDATED = ROOT / "data" / "daily_balanced.csv"
 OUT_MATCHED.parent.mkdir(parents=True, exist_ok=True)
 

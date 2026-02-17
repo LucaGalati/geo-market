@@ -350,7 +350,7 @@ def add_future_refs(group: pd.DataFrame) -> pd.DataFrame:
     dt = group["datetime"].to_numpy(dtype="datetime64[ns]")
     target = (group["datetime"] + pd.Timedelta(minutes=5)).to_numpy(dtype="datetime64[ns]")
 
-    idx = np.searchsorted(dt, target, side="right") - 1
+    idx = np.searchsorted(dt, target, side="right") + 1
     valid = (idx >= 0) & (idx < len(dt))
 
     mid_ref = group["mid_ref"].to_numpy(dtype="float64", copy=False)
@@ -448,7 +448,7 @@ def stage_phase_one(
         keep = ["ric","datetime","gmt","type","is_quote","is_trade","price","volume",
                 "bid","ask","bid_size","ask_size","date_local","day"]
         part = chunk[keep].copy()
-        part["day"] = part["day"].astype(str)
+        part["date_local"] = part["date_local"].astype(str)
 
         if tmp_format == "parquet":
             with timed(f"Phase 1 parquet write (chunk {chunk_idx})", timings):
@@ -462,7 +462,7 @@ def stage_phase_one(
                 )
         else:
             # write grouped shards as CSV.GZ
-            for (ric, d), sub in part.groupby(["ric","day"]):
+            for (ric, d), sub in part.groupby(["ric","date_local"]):
                 sub_path = out_root / f"ric={ric}" / f"day={d}"
                 sub_path.mkdir(parents=True, exist_ok=True)
                 file_path = sub_path / f"part-{np.random.randint(1e12)}.csv.gz"
@@ -539,10 +539,10 @@ def stage_phase_one_polars(
         )
 
         lf = lf.with_columns(
-            (pl.col("datetime") + pl.duration(seconds=local_offset_seconds)).alias("datetime")
+            (pl.col("datetime") + pl.duration(seconds=local_offset_seconds)).alias("local_dt")
         )
         lf = lf.with_columns(
-            pl.col("datetime").dt.date().cast(pl.Utf8).alias("day")
+            pl.col("local_dt").dt.date().cast(pl.Utf8).alias("date_local")
         )
 
         keep = [
@@ -577,6 +577,7 @@ def process_shard_folder(shard_dir: Path, tmp_format: str) -> pd.DataFrame:
         except Exception:
             return pd.DataFrame()
         if df.empty:
+            log(f"Empty shard after load (parquet): {shard_dir}")
             return df
     else:
         files = sorted(shard_dir.glob("*.csv.gz"))
@@ -584,6 +585,9 @@ def process_shard_folder(shard_dir: Path, tmp_format: str) -> pd.DataFrame:
             return pd.DataFrame()
         dfs = [pd.read_csv(f, compression="gzip", low_memory=False) for f in files]
         df = pd.concat(dfs, ignore_index=True)
+        if df.empty:
+            log(f"Empty shard after load (csv.gz): {shard_dir}")
+            return df
 
     # parse datetimes back
     df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce", utc=True)
@@ -599,6 +603,9 @@ def process_shard_folder(shard_dir: Path, tmp_format: str) -> pd.DataFrame:
     df = df.loc[~bad_quote].copy()
     bad_trade = df["is_trade"] & ((df["price"] < 0) | (df["volume"] < 0))
     df = df.loc[~bad_trade].copy()
+    if df.empty:
+        log(f"Empty shard after cleaning: {shard_dir}")
+        return df
 
     # midpoints
     df["mid"] = np.where(df["ask"].notna() & df["bid"].notna(), (df["ask"] + df["bid"]) / 2, np.nan)
@@ -614,14 +621,14 @@ def process_shard_folder(shard_dir: Path, tmp_format: str) -> pd.DataFrame:
     df["w_mid_quote"] = np.where(df["is_quote"], w_mid, np.nan)
 
     # sort
-    df = df.sort_values(["ric","day","datetime"], kind="mergesort")
+    df = df.sort_values(["ric","date_local","datetime"], kind="mergesort")
 
     # reference mids
-    df["mid_ref"]   = df.groupby(["ric","day"], group_keys=False)["mid_quote"].ffill()
-    df["w_mid_ref"] = df.groupby(["ric","day"], group_keys=False)["w_mid_quote"].ffill()
+    df["mid_ref"]   = df.groupby(["ric","date_local"], group_keys=False)["mid_quote"].ffill()
+    df["w_mid_ref"] = df.groupby(["ric","date_local"], group_keys=False)["w_mid_quote"].ffill()
 
     # direction
-    df["prev_mid_ref"] = df.groupby(["ric","day"])["mid_ref"].shift(1)
+    df["prev_mid_ref"] = df.groupby(["ric","date_local"])["mid_ref"].shift(1)
     df["direction"] = np.vectorize(compute_direction)(df["price"], df["prev_mid_ref"])
 
     # quoted spread
@@ -635,7 +642,7 @@ def process_shard_folder(shard_dir: Path, tmp_format: str) -> pd.DataFrame:
                                2 * df["e_spread"] * df["direction"], np.nan)
 
     # future refs
-    df = df.groupby(["ric","day"], group_keys=False).apply(add_future_refs)
+    df = df.groupby(["ric","date_local"], group_keys=False).apply(add_future_refs)
 
     # price impacts
     df["price_impact"] = np.where(
@@ -688,7 +695,7 @@ def process_shard_folder(shard_dir: Path, tmp_format: str) -> pd.DataFrame:
 
     # intraday volatility (std of price within each local day) 
     df["intraday_volatility"] = (
-        df.groupby(["ric", "day"], group_keys=False)["price"]
+        df.groupby(["ric", "date_local"], group_keys=False)["price"]
             .transform(lambda x: np.nanstd(x, ddof=1) if len(x.dropna()) > 1 else np.nan)
     )
 
@@ -711,7 +718,7 @@ def process_shard_folder(shard_dir: Path, tmp_format: str) -> pd.DataFrame:
     # 5m aggregation
     df["dt_5m"] = df["datetime"].dt.floor("5min")
     agg = (
-        df.groupby(["ric","dt_5m","day"], as_index=False)
+        df.groupby(["ric","dt_5m","date_local"], as_index=False)
           .agg(
               price_mean=("price","mean"),
               volume_mean=("volume","mean"),
@@ -818,14 +825,14 @@ def process_shard_folder_polars(shard_dir: Path, tmp_format: str) -> "pl.DataFra
         pl.when(pl.col("is_quote") == True).then(w_mid).otherwise(None).alias("w_mid_quote"),
     )
 
-    df = df.sort(["ric", "day", "datetime"])
+    df = df.sort(["ric", "date_local", "datetime"])
 
     df = df.with_columns(
-        pl.col("mid_quote").forward_fill().over(["ric", "day"]).alias("mid_ref"),
-        pl.col("w_mid_quote").forward_fill().over(["ric", "day"]).alias("w_mid_ref"),
+        pl.col("mid_quote").forward_fill().over(["ric", "date_local"]).alias("mid_ref"),
+        pl.col("w_mid_quote").forward_fill().over(["ric", "date_local"]).alias("w_mid_ref"),
     )
     df = df.with_columns(
-        pl.col("mid_ref").shift(1).over(["ric", "day"]).alias("prev_mid_ref")
+        pl.col("mid_ref").shift(1).over(["ric", "date_local"]).alias("prev_mid_ref")
     )
 
     direction = (
@@ -861,7 +868,7 @@ def process_shard_folder_polars(shard_dir: Path, tmp_format: str) -> "pl.DataFra
         (pl.col("datetime") + pl.duration(minutes=5)).alias("target_dt")
     )
     right = df.select(
-        "ric", "day",
+        "ric", "date_local",
         pl.col("datetime").alias("ref_dt"),
         pl.col("mid_ref").alias("mid_ref_future"),
         pl.col("w_mid_ref").alias("w_mid_ref_future"),
@@ -870,7 +877,7 @@ def process_shard_folder_polars(shard_dir: Path, tmp_format: str) -> "pl.DataFra
         right,
         left_on="target_dt",
         right_on="ref_dt",
-        by=["ric", "day"],
+        by=["ric", "date_local"],
         strategy="backward",
     )
 
@@ -944,7 +951,7 @@ def process_shard_folder_polars(shard_dir: Path, tmp_format: str) -> "pl.DataFra
     )
 
     df = df.with_columns(
-        pl.col("price").std(ddof=1).over(["ric", "day"]).alias("intraday_volatility")
+        pl.col("price").std(ddof=1).over(["ric", "date_local"]).alias("intraday_volatility")
     )
 
     df = df.with_columns(
@@ -1034,18 +1041,21 @@ def consolidate_phase_two(
     phase2_workers = max(1, int(phase2_workers))
     parquet_writer = None
     header_written = False
+    empty_shards = 0
+    total_shards = len(shard_dirs)
+
+    def _is_empty(agg):
+        if agg is None:
+            return True
+        if isinstance(agg, pd.DataFrame):
+            return agg.empty
+        if _HAS_POLARS and isinstance(agg, pl.DataFrame):
+            return agg.height == 0
+        return True
 
     def _append_output(agg):
         nonlocal parquet_writer, header_written
-        if agg is None:
-            return
-        if isinstance(agg, pd.DataFrame):
-            is_empty = agg.empty
-        elif _HAS_POLARS and isinstance(agg, pl.DataFrame):
-            is_empty = agg.height == 0
-        else:
-            is_empty = True
-        if is_empty:
+        if _is_empty(agg):
             return
         if out_format == "parquet":
             table = _to_arrow_table(agg)
@@ -1071,6 +1081,9 @@ def consolidate_phase_two(
                 agg = process_shard_folder_polars(shard, tmp_format)
             else:
                 agg = process_shard_folder(shard, tmp_format)
+            if _is_empty(agg):
+                empty_shards += 1
+                continue
             _append_output(agg)
     else:
         log(f"Phase 2 multiprocessing enabled ({phase2_workers} workers). Output order may be non-deterministic.")
@@ -1083,11 +1096,16 @@ def consolidate_phase_two(
                 with tqdm(total=len(futures), desc=f"[Phase 2] computing {staged_root.name}", unit="shard") as pbar:
                     for fut in as_completed(futures):
                         _, agg = fut.result()
-                        _append_output(agg)
+                        if _is_empty(agg):
+                            empty_shards += 1
+                        else:
+                            _append_output(agg)
                         pbar.update(1)
 
     if parquet_writer is not None:
         parquet_writer.close()
+    if total_shards:
+        log(f"Phase 2 empty shards skipped: {empty_shards}/{total_shards}")
 
 
 def _build_arg_parser():
