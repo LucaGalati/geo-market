@@ -24,7 +24,7 @@ except ImportError:
 
 EVENT_LOCAL_DAY = "2022-02-24"
 VAR = "qspread_mean"
-BENCH_WIN = (-20, -6)   # estimation window, separate from the evaluation days
+BENCH_WIN = (-20, -10)   # estimation window, separate from the evaluation days
 PRE_WIN = (-5, -1)      # closing hour
 POST_WIN = (0, 5)       # opening hour
 DAYS = list(range(-5, 6))

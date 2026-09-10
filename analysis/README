@@ -10,7 +10,7 @@ To replicate step by step:
   python src/d01_figures/intraday.py          -> output/figures|tables/intraday/{main,balanced}/{full,matched,eb}/
   python src/d01_figures/intraday_overnight.py-> output/figures|tables/overnight/...
   python src/d01_figures/descriptives.py      -> output/figures|tables/map/{main,balanced}/{full,matched}/ (+ firms_by_country.tex)
-  python src/d03_docs/build_sampling_docs.py  -> output/tables/{sample_selection,matching/balance}.tex,
+  python src/d03_docs/build_sampling_docs.py  -> output/tables/{sample_selection,currencies,matching/balance}.tex (longtable for the long ones),
                                                  ../docs/paper/sampling/{data_section,formulas_appendix}.tex, ../docs/paper/notes/filtering.md
   (figures carry no titles: the folder says sample and group; copy figures/tables into docs/paper by hand
    when compiling the manuscript; output/sampling/sampling_log.csv is the selection funnel)
