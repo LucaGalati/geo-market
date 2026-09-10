@@ -5,13 +5,9 @@ Main method  : Mahalanobis matching on the standardized log covariates
                (mktval, dollar volume, quoted spread) WITHIN a propensity
                caliper of 0.2*SD(logit PS) (Rubin & Thomas 2000; Austin 2011),
                1:1 without replacement, optimal assignment (Hungarian).
-Robustness   : (i) entropy balancing (Hainmueller 2012) — weights on the controls
+Robustness   : entropy balancing (Hainmueller 2012) — weights on the controls
                that exactly reproduce the treated means of the log covariates,
-               all controls retained (`eb_weight`; treated firms weigh 1);
-               (ii) the same matching with pairs restricted to the same trading
-               time zone (`matched_group_tz`: Americas / Europe-Africa-Middle East /
-               Asia-Pacific from the exchange GMT offset), so that Nearby firms are
-               compared with controls whose sessions see the news at the same time.
+               all controls retained (`eb_weight`; treated firms weigh 1).
 
 Output: one ric-level table (`psm_assignments.parquet`) + a balance table
 (`psm_balance.csv`). The panels themselves are never rewritten.
@@ -42,7 +38,7 @@ SMD_WARN = 0.10
 
 # ---------- DATA ----------
 def load_daily(path: Path) -> pd.DataFrame:
-    df = pd.read_parquet(path, columns=["ric", "date", TREATED_FLAG, "gmt", *COVARS])
+    df = pd.read_parquet(path, columns=["ric", "date", TREATED_FLAG, *COVARS])
     df["date"] = pd.to_datetime(df["date"], errors="coerce", utc=True)
     return df
 
@@ -53,7 +49,7 @@ def firm_level_pre(df: pd.DataFrame) -> pd.DataFrame:
     pre = df[df["date"] < CUTOFF]
     if pre.empty:
         raise ValueError("No pre-period data before 2022-02-24.")
-    agg = pre.groupby("ric", as_index=False).agg({TREATED_FLAG: "last", "gmt": "median", **{c: "median" for c in COVARS}})
+    agg = pre.groupby("ric", as_index=False).agg({TREATED_FLAG: "last", **{c: "median" for c in COVARS}})
     before = len(agg)
     agg = agg.dropna(subset=COVARS)
     for c in COVARS:
@@ -84,15 +80,7 @@ def _assign(D, ps_gap, caliper):
     return rows[ok], cols[ok]
 
 
-def time_zone(gmt) -> np.ndarray:
-    """Macro trading time zone of the exchange from its GMT offset."""
-    g = np.asarray(gmt, dtype=float)
-    return np.select([g <= -3, g >= 5], ["americas", "asia_pacific"], default="europe_africa_me")
-
-
-def match(agg: pd.DataFrame, strata=None):
-    """`strata`: optional array of labels (one per firm); pairs are then formed only
-    within the same stratum (the propensity score stays the global one)."""
+def match(agg: pd.DataFrame):
     X = np.log(agg[COVARS].to_numpy(dtype="float64"))
     y = agg[TREATED_FLAG].to_numpy()
     Xs = StandardScaler().fit_transform(X)
@@ -106,10 +94,6 @@ def match(agg: pd.DataFrame, strata=None):
     VI = np.linalg.inv(np.cov(Xs, rowvar=False))
     D = cdist(Xs[t], Xs[c], metric="mahalanobis", VI=VI)
     ps_gap = np.abs(ps_logit[t][:, None] - ps_logit[c][None, :])
-    if strata is not None:
-        st = np.asarray(strata)
-        ps_gap = np.where(st[t][:, None] == st[c][None, :], ps_gap, np.inf)
-    label = f"matching (caliper {{k}}·SD{', time-zone strata' if strata is not None else ''})"
     cols_bal = np.column_stack([Xs, ps_logit])
 
     # adaptive caliper: widest candidate with every |SMD| < SMD_WARN, else the
@@ -144,7 +128,7 @@ def match(agg: pd.DataFrame, strata=None):
     balance = []
     for j, name in enumerate([f"log({col}) " for col in COVARS] + ["ps_logit"]):
         col = cols_bal[:, j]
-        balance.append({"method": label.format(k=k), "variable": name.strip(),
+        balance.append({"method": f"matching (caliper {k}·SD)", "variable": name.strip(),
                         "smd_before": _smd(col[t], col[c]),
                         "smd_after": _smd(col[t_idx], col[c_idx])})
     info = {"caliper_sd": k, "caliper": caliper, "pairs": len(ti), "unmatched": int(t.sum()) - len(ti),
@@ -192,9 +176,6 @@ def run(in_path: Path, out_assign: Path, out_balance: Path) -> pd.DataFrame:
     slog.reset("matching")
     agg = firm_level_pre(load_daily(in_path))
     matched, bal_m, Xs, info = match(agg)
-    tz = time_zone(agg["gmt"])
-    matched_tz, bal_tz, _, info_tz = match(agg, strata=tz)
-    matched_tz = matched_tz[["matched_group", "matched_partner", "pair_distance"]].add_suffix("_tz")
     eb, bal_e, ess = entropy_balance(agg, Xs)
     n_t, n_c = int((agg[TREATED_FLAG] == 1).sum()), int((agg[TREATED_FLAG] == 0).sum())
     slog.log("matching", "Firms with valid pre-period covariates (median mktval, dollar volume, quoted spread > 0)",
@@ -203,18 +184,14 @@ def run(in_path: Path, out_assign: Path, out_balance: Path) -> pd.DataFrame:
              firms=info["pairs"], note=f"caliper {info['caliper_sd']}*SD(logit PS) = {info['caliper']:.3f}; max |SMD| {info['max_smd']:.3f}")
     slog.log("matching", "- treated firms without a control inside the caliper", firms=info["unmatched"])
     slog.log("matching", "Matched sample (treated + controls)", firms=2 * info["pairs"])
-    slog.log("matching", "Matched pairs within the same trading time zone (robustness)", firms=info_tz["pairs"],
-             note=f"caliper {info_tz['caliper_sd']}*SD(logit PS); max |SMD| {info_tz['max_smd']:.3f}; "
-                  f"treated unmatched {info_tz['unmatched']:,}")
     slog.log("matching", "Entropy balancing: effective number of controls", firms=round(ess),
              note=f"weights on {n_c:,} controls reproducing the treated covariate means")
 
-    assignments = pd.concat([agg, matched, matched_tz], axis=1)
-    assignments["time_zone"] = tz
+    assignments = pd.concat([agg, matched], axis=1)
     assignments["eb_weight"] = eb
     assignments.to_parquet(out_assign, index=False)
 
-    balance = pd.concat([bal_m, bal_tz, bal_e], ignore_index=True)
+    balance = pd.concat([bal_m, bal_e], ignore_index=True)
     balance.to_csv(out_balance, index=False)
     print("[balance]")
     print(balance.round(4).to_string(index=False))

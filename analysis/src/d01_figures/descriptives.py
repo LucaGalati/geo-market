@@ -6,7 +6,7 @@ except ImportError:
     import fig_common as fc
 
 for sample in fc.SAMPLES:
-    for group in ("full", "matched", "matched_tz"):  # entropy balancing keeps the full universe: same map as "full"
+    for group in ("full", "matched"):  # entropy balancing keeps the full universe: same map as "full"
         try:
             core.run(sample, group)
         except (FileNotFoundError, ValueError) as e:

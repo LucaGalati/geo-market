@@ -47,12 +47,23 @@ DROP_COLS = ["priceimpact_mean", "priceimpact2_mean", "w_priceimpact2_mean",
 # paper names for the measures of TRTH files produced before 10 Sep 2026 (no-op on newer files)
 RENAME = {"pi_jfe_sd_mean": "price_impact_mean", "pi_jfe_sd_fi_mean": "price_impact_fi_mean",
           "vol_jfe": "volatility", "vol_jfel": "log_volatility"}
-# TRTH prices are in local currency (pence in London, cents in Johannesburg): these
-# value measures are converted to USD with the firm-day rate implied by the
-# Datastream USD close (see merge_with_sample_and_filter)
+# TRTH prices are in the currency of the exchange (pence in London, cents in
+# Johannesburg, agorot in Tel Aviv): these value measures are converted to USD
+# with the daily ECB reference rate of the venue's currency (fx_rates.py); the few
+# venues whose currency the ECB does not quote use the exchange-day rate implied
+# by the Datastream USD close (see merge_with_sample_and_filter)
 USD_COLS = ["dollar_volume_mean", "dollar_volume_sum", "dvolume_mean", "dvolume_sum",
             "depth_value_mean", "depth_value_sum"]
 FX_DIAGNOSTICS = Path(__file__).resolve().parents[3] / "analysis" / "output" / "tables" / "fx_diagnostics.csv"
+FX_RATES = pd.read_csv(DATA_ROOT / "01_raw" / "handcoded" / "fx_rates_ecb.csv", parse_dates=["date"])
+VENUES = pd.read_csv(DATA_ROOT / "01_raw" / "handcoded" / "venue_currency.csv").fillna({"suffix": ""})
+# one rate per currency and calendar day (ECB quotes business days only: carry forward)
+_cal = pd.date_range(FX_RATES["date"].min(), FX_RATES["date"].max(), freq="D")
+FX_TABLE = (FX_RATES.pivot(index="date", columns="currency", values="local_per_usd")
+                    .reindex(_cal).ffill())
+VENUE_CCY = dict(zip(VENUES["suffix"].astype(str), VENUES["currency"]))
+VENUE_UNIT = dict(zip(VENUES["suffix"].astype(str), VENUES["unit_factor"]))
+FX_EXCLUDED = {}   # ric -> (suffix, firm implied rate / venue rate) for listings in another currency
 
 # daily aggregation: these are summed over the day, everything else numeric is averaged
 DAILY_SUM_COLS = ["dollar_volume_sum", "volume_sum", "trades_count", "quotes_count",
@@ -237,31 +248,51 @@ def merge_with_sample_and_filter(part: pd.DataFrame, counts: dict) -> pd.DataFra
     part = part.loc[part["suffix"] != "NXX"]
     counts["after_nxx"].update(part["ric"].unique())
 
-    # penny stocks: Datastream USD price at or below $1 (the local price is not a
-    # comparable threshold across currencies)
+    # penny stocks: Datastream USD price at or below $1, or local trade price at or
+    # below 1 (intervals without trades have no local price and are kept)
     part = part[pd.to_numeric(part["price"], errors="coerce") > 1]
+    part = part[~(pd.to_numeric(part["price_mean"], errors="coerce") <= 1)]
     counts["after_price"].update(part["ric"].unique())
 
-    # USD conversion: local units per USD for each firm-day = local close (last
-    # 5-minute bucket with trades; `price_close` once the TRTH files carry it) over
-    # the Datastream USD close of the same day. Firm-days without trades take the
-    # firm's rate on the nearest day, then the median of the market-day.
+    # USD conversion: ECB reference rate of the venue's currency on the local day
+    # (times the unit factor of the venue's prices); venues without an ECB currency
+    # use the exchange-day median of the rate implied by the Datastream USD close.
     close_col = "price_close" if "price_close" in part.columns else "price_mean"
     fd = part.groupby(["ric", "date"], sort=True).agg(suffix=("suffix", "first"), price=("price", "first")).reset_index()
     traded = part.loc[pd.to_numeric(part["trades_count"], errors="coerce") > 0]
     close = (traded.sort_values(["ric", "date", "datetime"], kind="mergesort")
                    .groupby(["ric", "date"])[close_col].last().rename("close").reset_index())
     fd = fd.merge(close, on=["ric", "date"], how="left")
-    fd["fx"] = pd.to_numeric(fd["close"], errors="coerce") / pd.to_numeric(fd["price"], errors="coerce")
-    fd["fx_source"] = np.where(fd["fx"].notna(), "firm_close", "")
-    nearest = fd.groupby("ric")["fx"].transform(lambda x: x.ffill().bfill())
-    fd.loc[fd["fx"].isna() & nearest.notna(), "fx_source"] = "firm_nearest_day"
+    fd["implied"] = pd.to_numeric(fd["close"], errors="coerce") / pd.to_numeric(fd["price"], errors="coerce")
+    fd["currency"] = fd["suffix"].map(VENUE_CCY).fillna("IMPLIED")
+    fd["unit"] = fd["suffix"].map(VENUE_UNIT).fillna(1).astype(float)
+    dates = pd.to_datetime(fd["date"])
+    ecb = np.array([FX_TABLE.at[d, c] if (c in FX_TABLE.columns and d in FX_TABLE.index) else np.nan
+                    for d, c in zip(dates, fd["currency"])], dtype=float)
+    fd["fx"] = ecb * fd["unit"]
+    fd["fx_source"] = np.where(fd["fx"].notna(), "ecb", "")
+    venue_day = fd.groupby(["suffix", "date"])["implied"].transform("median")
+    fd.loc[fd["fx"].isna() & venue_day.notna(), "fx_source"] = "implied_venue"
+    fd["fx"] = fd["fx"].fillna(venue_day)
+    nearest = fd.groupby("ric")["fx"].transform(lambda x: x.ffill().bfill())   # implied venues: days without trades
+    fd.loc[fd["fx"].isna() & nearest.notna(), "fx_source"] = "implied_nearest_day"
     fd["fx"] = nearest
-    market = fd.groupby(["suffix", "date"])["fx"].transform("median")
-    fd.loc[fd["fx"].isna() & market.notna(), "fx_source"] = "market_median"
-    fd["fx"] = fd["fx"].fillna(market)
+    # listings quoted in a currency other than that of their exchange: USD lines on
+    # non-USD venues (implied rate ~ 1) and lines in the major unit on a minor-unit
+    # venue (implied rate ~ 1/100 of the venue rate). The venue rate does not apply
+    # -> excluded. Other deviations (Datastream prices adjusted for later corporate
+    # actions) do not affect the ECB conversion and are kept.
+    firm_implied = fd["implied"].groupby(fd["ric"]).transform("median")
+    firm_ratio = firm_implied / fd["fx"]
+    usd_line = ((firm_implied - 1).abs() < 0.03) & (fd["currency"] != "USD")
+    unit_line = firm_ratio.notna() & ((firm_ratio < 0.02) | (firm_ratio > 50))
+    foreign = usd_line | unit_line
+    for r, sfx, ratio in fd.loc[foreign, ["ric", "suffix", "fx"]].assign(fx=firm_ratio[foreign]).drop_duplicates("ric").itertuples(index=False):
+        FX_EXCLUDED[r] = (sfx, float(ratio))
+    fd = fd.loc[~foreign]
     part = part.merge(fd[["ric", "date", "fx", "fx_source"]].rename(columns={"fx": "fx_local_per_usd"}),
-                      on=["ric", "date"], how="left")
+                      on=["ric", "date"], how="inner")
+    counts["after_fx"].update(part["ric"].unique())
     for c in USD_COLS:
         if c in part.columns:
             part[c] = part[c] / part["fx_local_per_usd"]
@@ -276,7 +307,7 @@ if not files:
 print(f"TRTH inputs: {len(files)} files ({Path(files[0]).suffix})")
 slog.reset("merge")
 
-counts = {k: set() for k in ["before_merge", "after_merge", "after_nxx", "after_price",
+counts = {k: set() for k in ["before_merge", "after_merge", "after_nxx", "after_price", "after_fx",
                              "final", "aerodef", "rusukr"]}
 writers = {
     "final":   ParquetAppender(OUT_INTRADAY),
@@ -317,7 +348,8 @@ print("\n--- UNIQUE RIC SUMMARY ---")
 print(f"Before merging:  {len(counts['before_merge']):,}")
 print(f"After merging:   {len(counts['after_merge']):,}")
 print(f"After removing NXX: {len(counts['after_nxx']):,}")
-print(f"After removing Datastream price<=$1: {len(counts['after_price']):,}")
+print(f"After removing price<=$1 (Datastream) or local price<=1: {len(counts['after_price']):,}")
+print(f"After removing listings quoted in another currency: {len(counts['after_fx']):,}")
 print(f"Main sample (excl. Aerospace/Defense, RUS/UKR): {len(counts['final']):,}")
 print(f"Aerospace/Defense: {len(counts['aerodef']):,} | RUS/UKR: {len(counts['rusukr']):,}")
 print("---------------------------\n")
@@ -334,7 +366,9 @@ slog.log("merge", "- rows on local Saturdays/Sundays", rows=T["rows_weekend"])
 slog.log("merge", "- rows on local exchange holidays", rows=T["rows_holiday"])
 slog.log("merge", "Firms matched to Datastream on (ric, local trading day)", firms=len(counts["after_merge"]))
 slog.log("merge", "- firms listed on venue NXX", firms=len(counts["after_merge"]) - len(counts["after_nxx"]))
-slog.log("merge", "- firms with Datastream price <= $1 (penny stocks)", firms=len(counts["after_nxx"]) - len(counts["after_price"]))
+slog.log("merge", "- firms with Datastream price <= $1 or local trade price <= 1 (penny stocks)", firms=len(counts["after_nxx"]) - len(counts["after_price"]))
+slog.log("merge", "- listings quoted in a currency different from their exchange", firms=len(counts["after_price"]) - len(counts["after_fx"]),
+         note=", ".join(sorted(FX_EXCLUDED)))
 slog.log("merge", "- Aerospace/Defense firms (separate sample)", firms=len(counts["aerodef"]))
 slog.log("merge", "- Russian/Ukrainian firms (separate sample)", firms=len(counts["rusukr"]))
 slog.log("merge", "Main 5-minute panel", firms=len(counts["final"]), rows=writers["final"].rows,
@@ -374,22 +408,20 @@ aggregate_daily(OUT_INTRADAY_RUSUKR, OUT_DAILY_RUSUKR, "RUS/UKR")
 
 # ---------- FX DIAGNOSTICS ----------
 def fx_diagnostics(daily_path: Path, out_path: Path):
-    """Firms whose implied rate deviates from their market's: USD-quoted lines
-    (e.g. `...u.TO`), stocks quoted in a different unit than their exchange, or
-    Datastream prices adjusted for later corporate actions."""
-    if not daily_path.exists():
-        return
-    d = pd.read_parquet(daily_path, columns=["ric", "date", "fx_local_per_usd", "fx_source"])
-    d["suffix"] = d["ric"].astype(str).str.extract(r"\.([A-Za-z0-9]+)$")[0].fillna("NY")
-    d["market_fx"] = d.groupby(["suffix", "date"])["fx_local_per_usd"].transform("median")
-    g = d.groupby("ric").agg(suffix=("suffix", "first"), n_days=("date", "size"),
-                             fx_median=("fx_local_per_usd", "median"), market_fx_median=("market_fx", "median"),
-                             share_firm_close=("fx_source", lambda x: float((x == "firm_close").mean())))
-    g["deviation"] = g["fx_median"] / g["market_fx_median"] - 1
-    g["flag"] = g["deviation"].abs() > 0.20
+    """Excluded listings (quoted in a currency other than their exchange's) and the
+    venues converted with the implied rate instead of an ECB rate."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    g.sort_values("deviation").to_csv(out_path)
-    print(f"[fx] firms with |rate / market rate - 1| > 20%: {int(g['flag'].sum())} of {len(g):,} → {out_path}")
+    rows = [{"kind": "excluded_listing", "ric": r, "suffix": s, "implied_over_venue_rate": ratio}
+            for r, (s, ratio) in sorted(FX_EXCLUDED.items())]
+    if daily_path.exists():
+        d = pd.read_parquet(daily_path, columns=["ric", "fx_source"])
+        d["suffix"] = d["ric"].astype(str).str.extract(r"\.([A-Za-z0-9]+)$")[0].fillna("NY")
+        imp = d[d["fx_source"] != "ecb"].groupby("suffix")["ric"].nunique()
+        rows += [{"kind": "implied_venue", "ric": "", "suffix": s, "implied_over_venue_rate": np.nan, "firms": int(n)}
+                 for s, n in imp.items()]
+    pd.DataFrame(rows).to_csv(out_path, index=False)
+    print(f"[fx] excluded listings: {len(FX_EXCLUDED)}; venues on the implied rate: "
+          f"{sum(r['kind'] == 'implied_venue' for r in rows)} → {out_path}")
 
 
 fx_diagnostics(OUT_DAILY, FX_DIAGNOSTICS)

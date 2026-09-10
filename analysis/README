@@ -5,9 +5,8 @@ Glossary of samples, groups and measures: ../CONTEXT.md. Design decisions: ../do
 
 To replicate step by step:
   python src/d00_preprocessing/gathering.py   -> data/{daily,intraday}_{main,balanced}.parquet
-  python src/d00_preprocessing/matching.py    -> data/psm_assignments.parquet (matched_group = global pairs,
-                                                 matched_group_tz = pairs within the same trading time zone, eb_weight), data/psm_balance.csv
-  python src/d01_figures/daily.py             -> output/figures/daily/{main,balanced}/{full,matched,eb,matched_tz}/
+  python src/d00_preprocessing/matching.py    -> data/psm_assignments.parquet (matched_group, eb_weight), data/psm_balance.csv
+  python src/d01_figures/daily.py             -> output/figures/daily/{main,balanced}/{full,matched,eb}/
   python src/d01_figures/intraday.py          -> output/figures|tables/intraday/{main,balanced}/{full,matched,eb}/
   python src/d01_figures/intraday_overnight.py-> output/figures|tables/overnight/...
   python src/d01_figures/descriptives.py      -> output/figures|tables/map/{main,balanced}/{full,matched}/ (+ firms_by_country.tex)

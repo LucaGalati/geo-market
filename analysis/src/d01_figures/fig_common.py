@@ -25,10 +25,9 @@ TABLES_ROOT = OUTPUT_ROOT / "tables"
 ASSIGNMENTS = DATA_ROOT / "psm_assignments.parquet"
 
 SAMPLES = ("main", "balanced")
-GROUPS = ("full", "matched", "eb", "matched_tz")
+GROUPS = ("full", "matched", "eb")
 SAMPLE_TITLE = {"main": "Main sample (unbalanced)", "balanced": "Perfectly balanced sample"}
-GROUP_TITLE = {"full": "Nearby vs Distant", "matched": "Matched pairs", "eb": "Entropy-balanced controls",
-               "matched_tz": "Matched pairs within trading time zone"}
+GROUP_TITLE = {"full": "Nearby vs Distant", "matched": "Matched pairs", "eb": "Entropy-balanced controls"}
 WINSOR = (0.01, 0.99)  # per-variable, firm-day pooled, inside the plotted sample
 LABEL_MAP = {1: "Nearby", 0: "Distant"}
 
@@ -57,19 +56,17 @@ def assign_groups(df: pd.DataFrame, group: str, label_col: str = "group",
     written to the sample-selection log.
       full    : Nearby = nbr_1_or_2 == 1, everyone else Distant, w = 1
       matched : treated/control pairs of the matching, w = 1
-      eb      : all treated (w = 1) vs all controls weighted by eb_weight
-      matched_tz : pairs of the matching restricted to the same trading time zone (robustness)"""
+      eb      : all treated (w = 1) vs all controls weighted by eb_weight"""
     if group == "full":
         df[label_col] = pd.to_numeric(df["nbr_1_or_2"], errors="coerce").map(LABEL_MAP)
         df["w"] = 1.0
-    elif group in ("matched", "eb", "matched_tz"):
+    elif group in ("matched", "eb"):
         if not ASSIGNMENTS.exists():
             raise FileNotFoundError(f"{ASSIGNMENTS} not found — run matching.py first.")
-        a = pd.read_parquet(ASSIGNMENTS, columns=["ric", "nbr_1_or_2", "matched_group", "matched_group_tz", "eb_weight"])
-        if group in ("matched", "matched_tz"):
-            col = "matched_group" if group == "matched" else "matched_group_tz"
-            a = a[a[col].isin([0, 1])]
-            a[label_col] = a[col].map(LABEL_MAP)
+        a = pd.read_parquet(ASSIGNMENTS, columns=["ric", "nbr_1_or_2", "matched_group", "eb_weight"])
+        if group == "matched":
+            a = a[a["matched_group"].isin([0, 1])]
+            a[label_col] = a["matched_group"].map(LABEL_MAP)
             a["w"] = 1.0
         else:
             a = a[a["eb_weight"].notna()]

@@ -4,8 +4,10 @@ All outputs are Parquet; the analysis stage (../analysis) reads data/03_output/*
 Step by step:
   python src/d00_gathering/sample.py                  -> data/02_preprocessed/sample.csv (Datastream, USD)
   python src/d01_preprocessing/trth.py [options]      -> data/02_preprocessed/trth/ukraine*.parquet
-  python src/d02_panels/merge.py   (dollar volume and depth value converted to USD with the firm-day rate implied by the
-                                   Datastream USD close; diagnostics in analysis/output/tables/fx_diagnostics.csv)                      -> data/03_output/{intraday,daily,...}.parquet
+  python src/d00_gathering/fx_rates.py   -> data/01_raw/handcoded/{fx_rates_ecb,venue_currency}.csv (ECB reference rates,
+                                            currency and unit factor of each venue; run once before merge.py)
+  python src/d02_panels/merge.py   (dollar volume and depth value converted to USD with the ECB rate of the venue's currency;
+                                   excluded listings and implied-rate venues in analysis/output/tables/fx_diagnostics.csv)                      -> data/03_output/{intraday,daily,...}.parquet
 
 TRTH preprocessing (two phases: stage shards per ric x LOCAL trading day, then compute 5-minute metrics):
   python src/d01_preprocessing/trth.py --phase2-workers 8 --output-format parquet --timings
