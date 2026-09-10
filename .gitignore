@@ -12,3 +12,4 @@ docs/
 **/old/
 *.so
 build/
+.Rhistory
