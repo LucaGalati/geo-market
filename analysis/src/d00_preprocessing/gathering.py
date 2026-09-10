@@ -1,155 +1,187 @@
-import pandas as pd 
-import numpy as np 
-from pathlib import Path 
-from tqdm import tqdm 
-import multiprocessing as mp 
+"""Build the analysis panels from the merged TRTH×Datastream output.
 
-# ---------- PATHS ---------- 
-ROOT = Path(__file__).resolve().parents[3] 
-ROOT_PRE = ROOT / "preprocessing" / "data" / "03_output" 
-ROOT_OUT = ROOT / "analysis" / "data" 
-ROOT_OUT.mkdir(parents=True, exist_ok=True) 
+Two samples per panel, written as parquet in analysis/data:
+- *_main.parquet     : UNBALANCED panel — a firm enters with data on >= MIN_DAYS
+                       trading days both before and after the event (max observations,
+                       same firms on both sides). This is the main sample.
+- *_balanced.parquet : PERFECTLY BALANCED panel — firms observed on every trading day
+                       of the union window calendar (robustness; on a global panel
+                       this drops markets with local holidays by construction).
 
-FILES = { 
-    "intraday": ROOT_PRE / "intraday.csv", 
-    "daily" : ROOT_PRE / "daily.csv", 
-    "rusukr" : ROOT_PRE / "intraday_RUS_UKR.csv", 
-    "aerodef" : ROOT_PRE / "intraday_AERO_DEF.csv", 
-    "rusukr_daily" : ROOT_PRE / "daily_RUS_UKR.csv", 
-    "aerodef_daily": ROOT_PRE / "daily_AERO_DEF.csv", 
+The 5-minute panels are processed with polars in streaming mode (never fully in
+RAM); the daily panels with pandas.
+"""
+from datetime import datetime, timezone
+from pathlib import Path
+import time
+
+import numpy as np
+import pandas as pd
+import polars as pl
+
+try:
+    from . import sampling_log as slog
+except ImportError:
+    import sampling_log as slog
+
+# ---------- PATHS ----------
+ROOT = Path(__file__).resolve().parents[3]
+ROOT_PRE = ROOT / "preprocessing" / "data" / "03_output"
+ROOT_OUT = ROOT / "analysis" / "data"
+ROOT_OUT.mkdir(parents=True, exist_ok=True)
+
+# label -> (input file, output stem, kind)
+FILES = {
+    "intraday":         (ROOT_PRE / "intraday.parquet",          "intraday",         "intraday"),
+    "daily":            (ROOT_PRE / "daily.parquet",             "daily",            "daily"),
+    "rusukr_intraday":  (ROOT_PRE / "intraday_RUS_UKR.parquet",  "rusukr_intraday",  "intraday"),
+    "aerodef_intraday": (ROOT_PRE / "intraday_AERO_DEF.parquet", "aerodef_intraday", "intraday"),
+    "rusukr_daily":     (ROOT_PRE / "daily_RUS_UKR.parquet",     "rusukr_daily",     "daily"),
+    "aerodef_daily":    (ROOT_PRE / "daily_AERO_DEF.parquet",    "aerodef_daily",    "daily"),
 }
 
-# ---------- TIME WINDOW ---------- 
-CUTOFF = pd.Timestamp("2022-02-24", tz="UTC") 
-START = pd.Timestamp("2022-01-27", tz="UTC") 
-END = pd.Timestamp("2022-03-23", tz="UTC") 
+# ---------- TIME WINDOW ----------
+CUTOFF = datetime(2022, 2, 24, tzinfo=timezone.utc)
+START = datetime(2022, 1, 27, tzinfo=timezone.utc)
+END_EXCL = datetime(2022, 3, 24, tzinfo=timezone.utc)  # keeps the WHOLE last day for 5-minute data
+MIN_DAYS = 1  # main sample: >= MIN_DAYS trading days pre AND post
 
-# ---------- REQUIRED VARS ---------- 
-REQUIRED_INTRADAY = ["qspread_mean", "espread_mean", "dollar_volume_mean", "priceimpact_mean", "intraday_vol_mean", "intraday_5m_vol_mean", "mktval"] 
-REQUIRED_DAILY = ["qspread_mean", "espread_mean", "dollar_volume_mean", "priceimpact_mean", "intraday_vol_mean", "intraday_5m_vol_mean", "mktval"] 
+# rows must have these non-missing (the mechanism/volatility subsets are a
+# dropna at analysis time, not separate files)
+REQUIRED_VARS = [
+    "qspread_mean", "espread_mean", "trades_count", "dollar_volume_mean",
+    "mktval", "price_impact_mean", "realized_spread_mean",
+]
 
-# ---------- PARALLEL SAFE CHUNK READER ---------- 
-def fast_read_csv(path, chunksize=3_000_000): 
-    """Read very large CSV in smaller chunks quickly and keep order stable.""" 
-    chunks = [] 
-    for chunk in pd.read_csv(path, low_memory=False, chunksize=chunksize): 
-        chunks.append(chunk) 
-    df = pd.concat(chunks, ignore_index=True) 
-    return df.sort_values(["ric"], kind="mergesort").reset_index(drop=True) 
 
-# ---------- BALANCING UTILS ---------- 
-def balance_panel(df, date_col, label): 
-    """Keep only RICs with equal counts before and after cutoff date.""" 
-    df = df.sort_values(["ric", date_col], 
-kind="mergesort").reset_index(drop=True) 
-    df = df.copy() 
-    df["period"] = np.where(df[date_col] >= CUTOFF, "after", "before") 
-    counts = ( 
-        df.groupby(["ric", "period"], sort=False) 
-            .size() 
-            .unstack(fill_value=0) 
-            .sort_index(kind="mergesort") 
-    ) 
-    for col in ["before", "after"]: 
-        if col not in counts: 
-            counts[col] = 0 
-    keep_rics = counts.index[counts["before"] == counts["after"]] 
-    kept = df[df["ric"].isin(keep_rics)].copy() 
-    kept = kept.sort_values(["ric", date_col], kind="mergesort").reset_index(drop=True) 
-    print(f" [{label}] balanced RICs {len(keep_rics):,} / total {df['ric'].nunique():,}") 
-    return kept 
+# ---------- INTRADAY (polars, streaming) ----------
+def process_intraday(path: Path, stem: str, label: str):
+    lf = pl.scan_parquet(path, low_memory=True)
+    schema = lf.collect_schema().names()
+    missing = [c for c in REQUIRED_VARS if c not in schema]
+    if missing:
+        print(f" [{label}] Missing columns {missing}. Skipping.")
+        return
 
-# ---------- DATE COLUMN DETECTION ---------- 
-def detect_datetime_col(df, label): 
-    if label in {"daily", "rusukr_daily", "aerodef_daily"}: 
-        for c in ["date", "local_date"]: 
-            if c in df.columns: 
-                return c 
-    else: 
-        for c in ["datetime", "local_datetime"]: 
-            if c in df.columns: 
-                return c 
-    raise ValueError(f"No datetime column found in {label}.") 
+    lf = (
+        lf.filter((pl.col("datetime") >= START) & (pl.col("datetime") < END_EXCL))
+          .filter(pl.all_horizontal([pl.col(c).is_not_null() for c in REQUIRED_VARS]))
+          .with_columns(
+              pl.when(pl.col("datetime") >= CUTOFF).then(pl.lit("after"))
+                .otherwise(pl.lit("before")).alias("period")
+          )
+    )
 
-# ---------- PROCESSOR ---------- 
-def process_file(path: Path, label: str): 
-    if not path.exists(): 
-        print(f"⚠️ File not found: {path}") 
-        return 
+    # trading days per (ric, period) on the LOCAL trading day
+    days = (lf.group_by(["ric", "period"])
+              .agg(pl.col("date_local").n_unique().alias("n_days"))
+              .collect(engine="streaming"))
+    if days.height == 0:
+        print(f" [{label}] No rows in window.")
+        return
+    piv = days.pivot(index="ric", on="period", values="n_days").fill_null(0)
+    for col in ("before", "after"):
+        if col not in piv.columns:
+            piv = piv.with_columns(pl.lit(0).alias(col))
+    main_rics = piv.filter((pl.col("before") >= MIN_DAYS) & (pl.col("after") >= MIN_DAYS))["ric"]
 
-    print(f"\n--- Processing {label} ---") 
-    df = fast_read_csv(path) 
-    total_rics = df["ric"].nunique() if "ric" in df.columns else 0 
-    print(f"Loaded {len(df):,} rows, {total_rics:,} RICs") 
+    total_days = lf.select(pl.col("date_local").n_unique()).collect(engine="streaming").item()
+    firm_days = lf.group_by("ric").agg(pl.col("date_local").n_unique().alias("n")).collect(engine="streaming")
+    bal_rics = firm_days.filter(pl.col("n") == total_days)["ric"]
 
-    # Select proper required variable set 
-    if label in {"daily", "rusukr_daily", "aerodef_daily"}: 
-        required_vars = REQUIRED_DAILY 
-    else: 
-        required_vars = REQUIRED_INTRADAY 
+    n_all = piv.height
+    n_rows_all = lf.select(pl.len()).collect(engine="streaming").item()
+    n_firms_in = pl.scan_parquet(path).select(pl.col("ric").n_unique()).collect(engine="streaming").item()
+    slog.log("gathering", f"{label}: firms in the merged panel", firms=n_firms_in)
+    slog.log("gathering", f"{label}: rows in window 27 Jan-23 Mar 2022 with all required variables non-missing",
+             firms=n_all, rows=n_rows_all, note="required: " + ", ".join(REQUIRED_VARS))
+    print(f" [{label}] main (>= {MIN_DAYS} trading days pre & post): {len(main_rics):,} / {n_all:,} firms")
+    print(f" [{label}] balanced (all {total_days} union trading days): {len(bal_rics):,} / {n_all:,} firms")
 
-    missing_cols = [c for c in required_vars if c not in df.columns] 
-    if missing_cols: 
-        print(f" [{label}] Missing required columns {missing_cols}. Skipping.") 
-        return 
+    for rics, suffix in ((main_rics, "main"), (bal_rics, "balanced")):
+        out = ROOT_OUT / f"{stem}_{suffix}.parquet"
+        lf.filter(pl.col("ric").is_in(rics.implode())).sink_parquet(out, engine="streaming")
+        n_rows = pl.scan_parquet(out).select(pl.len()).collect().item()
+        print(f"✅ Saved {label} | {suffix} → {out} ({n_rows:,} rows)")
+        rule = (f">= {MIN_DAYS} trading day(s) with data both before and after 24 Feb 2022" if suffix == "main"
+                else f"data on all {total_days} trading days of the union calendar")
+        slog.log("gathering", f"{label}: {suffix} sample", firms=len(rics), rows=n_rows, note=rule)
 
-    # Detect & parse datetime 
-    date_col = detect_datetime_col(df, label) 
-    df[date_col] = pd.to_datetime(df[date_col], errors="coerce", utc=True) 
-    df = df.dropna(subset=[date_col]) 
 
-    # ---- SORT FIX ---- 
-    sort_keys = ["ric"] 
-    if {"date", "time"} <= set(df.columns): 
-        sort_keys += ["date", "time"] 
-    else: 
-        sort_keys.append(date_col) 
-    df = df.sort_values(sort_keys, kind="mergesort").reset_index(drop=True) 
-    # ------------------- 
+# ---------- DAILY (pandas) ----------
+def _period(df, date_col):
+    return np.where(df[date_col] >= pd.Timestamp(CUTOFF), "after", "before")
 
-    # Restrict to window [START, END] 
-    df = df[(df[date_col] >= START) & (df[date_col] <= END)].copy() 
-    if df.empty: 
-        print(f" [{label}] No rows in window {START.date()}–{END.date()}.") 
-        return 
 
-    # Require completeness on required vars 
-    before_rows = len(df) 
-    df = df.dropna(subset=required_vars) 
-    df = df.sort_values(["ric", date_col], kind="mergesort").reset_index(drop=True) 
-    print(f" [{label}] dropna({required_vars}) → {before_rows:,} → {len(df):,}") 
+def filter_panel(df, date_col, label, min_days=MIN_DAYS):
+    """Main sample: firms with >= min_days trading days BOTH before and after the cutoff."""
+    df = df.copy()
+    df["period"] = _period(df, date_col)
+    days = df.groupby(["ric", "period"], sort=False)[date_col].nunique().unstack(fill_value=0)
+    for col in ["before", "after"]:
+        if col not in days:
+            days[col] = 0
+    keep = days.index[(days["before"] >= min_days) & (days["after"] >= min_days)]
+    kept = df[df["ric"].isin(keep)].sort_values(["ric", date_col], kind="mergesort").reset_index(drop=True)
+    print(f" [{label}] main (>= {min_days} trading days pre & post): {len(keep):,} / {days.shape[0]:,} firms")
+    return kept
 
-        
-    # Balance before/after 
-    balanced = balance_panel(df, date_col, label) 
-    print(f" [{label}] final {len(balanced):,} rows") 
 
-    # Sort final output 
-    balanced = balanced.sort_values(["ric", date_col], kind="mergesort").reset_index(drop=True) 
+def perfectly_balanced_panel(df, date_col, label):
+    """Robustness sample: firms observed on EVERY trading day of the union window calendar."""
+    df = df.copy()
+    df["period"] = _period(df, date_col)
+    total_days = df[date_col].nunique()
+    firm_days = df.groupby("ric")[date_col].nunique()
+    keep = firm_days.index[firm_days == total_days]
+    kept = df[df["ric"].isin(keep)].sort_values(["ric", date_col], kind="mergesort").reset_index(drop=True)
+    print(f" [{label}] balanced (all {total_days} union trading days): {len(keep):,} / {df['ric'].nunique():,} firms")
+    return kept
 
-    # Save per dataset 
-    out_map = { 
-        "intraday" : ROOT_OUT / "intraday_balanced.csv", 
-        "daily" : ROOT_OUT / "daily_balanced.csv", 
-        "rusukr" : ROOT_OUT / "rusukr_balanced.csv", 
-        "aerodef" : ROOT_OUT / "aerodef_balanced.csv", 
-        "rusukr_daily" : ROOT_OUT / "rusukr_daily_balanced.csv", 
-        "aerodef_daily" : ROOT_OUT / "aerodef_daily_balanced.csv", 
-    } 
-    out_path = out_map[label] 
-    balanced.to_csv(out_path, index=False) 
-    print(f"✅ Saved {label} → {out_path}") 
 
-# ---------- MAIN ---------- 
-def main(): 
-    print("Starting balancing for intraday/daily/ruua with full var completeness...\n") 
-    ncpu = max(1, mp.cpu_count() - 1) 
-    print(f"Using up to {ncpu} CPU cores") 
+def process_daily(path: Path, stem: str, label: str):
+    df = pd.read_parquet(path)
+    missing = [c for c in REQUIRED_VARS if c not in df.columns]
+    if missing:
+        print(f" [{label}] Missing columns {missing}. Skipping.")
+        return
+    df["date"] = pd.to_datetime(df["date"], errors="coerce", utc=True)
+    df = df.dropna(subset=["date"])
+    df = df[(df["date"] >= pd.Timestamp(START)) & (df["date"] < pd.Timestamp(END_EXCL))]
+    n_firms_in = df["ric"].nunique()
+    df = df.dropna(subset=REQUIRED_VARS)
+    if df.empty:
+        print(f" [{label}] No rows in window.")
+        return
+    print(f" [{label}] loaded {len(df):,} rows, {df['ric'].nunique():,} firms")
+    slog.log("gathering", f"{label}: firms in the merged panel", firms=n_firms_in)
+    slog.log("gathering", f"{label}: rows in window 27 Jan-23 Mar 2022 with all required variables non-missing",
+             firms=df["ric"].nunique(), rows=len(df), note="required: " + ", ".join(REQUIRED_VARS))
 
-    for label, path in tqdm(FILES.items(), desc="Processing datasets", unit="file"): 
-        process_file(path, label) 
+    for build, suffix in ((filter_panel, "main"), (perfectly_balanced_panel, "balanced")):
+        out = ROOT_OUT / f"{stem}_{suffix}.parquet"
+        panel = build(df, "date", label)
+        panel.to_parquet(out, index=False)
+        print(f"✅ Saved {label} | {suffix} → {out} ({len(panel):,} rows)")
+        rule = (f">= {MIN_DAYS} trading day(s) with data both before and after 24 Feb 2022" if suffix == "main"
+                else f"data on all {df['date'].nunique()} trading days of the union calendar")
+        slog.log("gathering", f"{label}: {suffix} sample", firms=panel["ric"].nunique(), rows=len(panel), note=rule)
 
-    print("\n✅ All datasets processed successfully.") 
 
-if __name__ == "__main__": 
+# ---------- MAIN ----------
+def main():
+    print(f"Building panels: main (>= {MIN_DAYS} trading days pre & post) and perfectly balanced\n")
+    slog.reset("gathering")
+    for label, (path, stem, kind) in FILES.items():
+        if not path.exists():
+            print(f"⚠️ File not found: {path}")
+            continue
+        print(f"\n--- {label} ---")
+        t0 = time.perf_counter()
+        (process_intraday if kind == "intraday" else process_daily)(path, stem, label)
+        print(f" [{label}] done in {time.perf_counter() - t0:.0f}s")
+    print("\n✅ All datasets processed successfully.")
+
+
+if __name__ == "__main__":
     main()

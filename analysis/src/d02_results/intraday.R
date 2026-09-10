@@ -12,10 +12,17 @@ library(texreg)
 # --- LOAD DATA ---
 ################################################################################
 
+source("~/Desktop/geo-market/analysis/R/requirements.R")
+library(arrow)
 DATA_ROOT <- "~/Desktop/geo-market/analysis/data"
-INTRADAY  <- file.path(DATA_ROOT, "intraday_balanced_psm.csv") 
-DT <- fread(INTRADAY)
-DT[, datetime := ymd_hms(datetime, tz="UTC")]
+SAMPLE    <- "main"   # "main" (unbalanced) or "balanced" (perfectly balanced)
+INTRADAY  <- file.path(DATA_ROOT, paste0("intraday_", SAMPLE, ".parquet"))
+DT <- as.data.table(read_parquet(INTRADAY,
+        col_select = c("ric", "datetime", "date_local", "nbr_1_or_2", "qspread_mean")))
+psm <- as.data.table(read_parquet(file.path(DATA_ROOT, "psm_assignments.parquet"),
+        col_select = c("ric", "matched_group", "eb_weight")))
+DT <- merge(DT, psm, by = "ric", all.x = TRUE)
+DT[, datetime := as.POSIXct(datetime, tz = "UTC")]
 DT <- DT[!is.na(datetime)]
 setorder(DT, ric, datetime)
 
@@ -67,7 +74,7 @@ close_hr <- hourly_mean("is_close_hour")
 # --- BENCHMARKING (SAME AS PYTHON) ---
 ################################################################################
 
-BENCH_WIN <- c(-10,-6)
+BENCH_WIN <- c(-20,-6)   # same as analysis/src/d01_figures/fig_intraday_core.py
 PRE_WIN   <- c(-5,-1)
 POST_WIN  <- c(0,5)
 
@@ -100,15 +107,7 @@ z_post <- standardize(open_hr,  POST_WIN, bench_open)
 
 z_all <- rbind(z_pre, z_post)
 
-################################################################################
-# --- WINSORIZATION (same as Python: 1–99%) ---
-################################################################################
-
-LOW_PCT <- 1
-HIGH_PCT <- 99
-
-lims <- quantile(z_all$z, probs = c(LOW_PCT/100, HIGH_PCT/100), na.rm = TRUE)
-z_all[, z := pmin(pmax(z, lims[1]), lims[2])]
+# no winsorization of z (same as the Python figures)
 z_all <- z_all[is.finite(z)]
 
 ################################################################################

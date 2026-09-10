@@ -1,13 +1,15 @@
-The analysis is divided in two parts. 
+The analysis is divided in two parts.
 
-- Data preprocessing is generated in Python in the folder "preprocessing". 
+- Data preprocessing (Python) in "preprocessing": Datastream sample, TRTH tick data -> 5-minute liquidity
+  metrics, merged panels. Outputs are Parquet files in preprocessing/data/03_output.
 
-- The main results is conducted in R to ensure greater platform independence and can be found in the folder "analysis"
+- Analysis in "analysis": panels (main = unbalanced, balanced = perfectly balanced), firm-level matching
+  (Mahalanobis within a propensity caliper; entropy-balancing weights as robustness), figures for the
+  2x2 grid {main, balanced} x {full, matched}, and the R regressions.
 
-Both folders, in turn, contain README files with detailed instructions. 
+Both folders contain README files with the run order. CONTEXT.md is the glossary of samples, groups and
+measures; docs/adr/ records the design decisions.
 
-Run run.py to execute all codes together and replicate the package.
+Run run.py to execute everything, or preprocessing/master.py and analysis/main.py by stage.
 
-Run master.py in the preprocessing folder and the main.py in the analysis folder to replicate the package separately by stage.
-
-The required conda environment is specified in environment.yml.
+Python: conda environment in environment.yml. R: system R (>= 4.4) plus `Rscript analysis/R/requirements.R`.

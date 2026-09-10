@@ -17,13 +17,18 @@ def main():
 
     # 2) Parse date column and compute returns
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    
-    # log returns (only compute when both current and previous prices are > 0)
-    p = df.groupby("RIC", group_keys=False)["price"].apply(
-        lambda x: x.where(x > 0)  # mask non-positive
-    )
-    log_p = np.log(p)             # no log(<=0)
-    df["daily_log_return"] = log_p.groupby(df["RIC"]).diff()
+
+    # diff() below uses row order, so sort (and dedup) BEFORE computing returns:
+    # the raw file is stacked download batches, not chronologically ordered.
+    # mergesort is stable, so on duplicate (RIC, date) the earlier (priced) batch row wins.
+    df = df.sort_values(by=["RIC", "date"], kind="mergesort").reset_index(drop=True)
+    df = df.drop_duplicates(subset=["RIC", "date"], keep="first")
+
+    # log returns between consecutive PRICED observations: the static-info batch
+    # has price=NaN on every row and must not break the return pairs
+    priced = df[df["price"] > 0]
+    ret = np.log(priced["price"]).groupby(priced["RIC"]).diff()
+    df["daily_log_return"] = ret  # index-aligned; rows without a valid price stay NaN
     df["daily_squared_log_return"] = df["daily_log_return"] ** 2
 
     # 3) Define date range
@@ -31,7 +36,6 @@ def main():
     end_date = pd.Timestamp("2022-03-23")
 
     # 4) Filter for date range
-    df = df.sort_values(by=["RIC", "date"]).reset_index(drop=True)
     mask = (df["date"] >= start_date) & (df["date"] <= end_date)
     df_filtered = df.loc[mask]
 
@@ -114,6 +118,8 @@ def main():
     # c) Gaussian decay
     sigma = 1000
     df_filtered["treat_ukr_gauss"] = np.exp(-(df_filtered["dist_ukr"] ** 2) / (2 * sigma ** 2))
+    # d) Inverse-distance 2
+    df_filtered["treat_ukr_inv2"] = - (1 + df_filtered["dist_ukr"])
 
     # 16) Continuous treatment variables based on dist_invasion
     # a) Inverse-distance
@@ -125,6 +131,8 @@ def main():
     # c) Gaussian decay
     sigma2 = 1000
     df_filtered["treat_invasion_gauss"] = np.exp(-(df_filtered["dist_invasion"] ** 2) / (2 * sigma2 ** 2))
+    # d) Inverse-distance 2
+    df_filtered["treat_invasion_inv2"] = - (1 + df_filtered["dist_invasion"]) 
 
     # 17) Rename RIC column to ric
     df_filtered = df_filtered.rename(columns={"RIC": "ric"})

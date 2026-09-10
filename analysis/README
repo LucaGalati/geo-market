@@ -1,17 +1,25 @@
-Run main.py to replicate all the results together
+Run main.py to replicate all the results together (panels -> matching -> figures -> R tables).
 
-Run src/d00_preprocessing/gathering.py and src/d00_preprocessing/matching.py before running the below codes to replicate results separately
-Run src/d01_figures/daily.py to replicate daily figures
-Run src/d01_figures/intraday.py to replicate intraday figures
-Run src/d02_results/daily.R to replicate daily-level results
-Run src/d02_results/intraday.R to replicate intraday-level results
-Run src/d02_results/russiaukraine.R to replicate results for the Russian and Ukrainen firms
-Run src/d02_results/aerospacedefense.R to replicate results for the Aerospace and Defense firms
+Inputs: preprocessing/data/03_output/*.parquet (produced by preprocessing/master.py).
+Glossary of samples, groups and measures: ../CONTEXT.md. Design decisions: ../docs/adr/.
 
+To replicate step by step:
+  python src/d00_preprocessing/gathering.py   -> data/{daily,intraday}_{main,balanced}.parquet
+  python src/d00_preprocessing/matching.py    -> data/psm_assignments.parquet (matched_group = global pairs,
+                                                 matched_group_tz = pairs within the same trading time zone, eb_weight), data/psm_balance.csv
+  python src/d01_figures/daily.py             -> output/figures/daily/{main,balanced}/{full,matched,eb,matched_tz}/
+  python src/d01_figures/intraday.py          -> output/figures|tables/intraday/{main,balanced}/{full,matched,eb}/
+  python src/d01_figures/intraday_overnight.py-> output/figures|tables/overnight/...
+  python src/d01_figures/descriptives.py      -> output/figures|tables/map/{main,balanced}/{full,matched}/ (+ firms_by_country.tex)
+  python src/d03_docs/build_sampling_docs.py  -> output/tables/{sample_selection,matching/balance}.tex,
+                                                 ../docs/paper/sampling/{data_section,formulas_appendix}.tex, ../docs/paper/notes/filtering.md
+  (figures carry no titles: the folder says sample and group; copy figures/tables into docs/paper by hand
+   when compiling the manuscript; output/sampling/sampling_log.csv is the selection funnel)
+  Rscript src/d02_results/daily.R             (set SAMPLE <- "main" or "balanced" at the top)
+  Rscript src/d02_results/intraday.R
+  Rscript src/d02_results/descriptives.R
 
-Tested on Dec 1, 2025
-Device: MacBook Pro M4 Max
-Memory: 32GB
-macOS: 26.1
+R: system R >= 4.4; run `Rscript R/requirements.R` once to install the packages (arrow, data.table, fixest, plm, ...).
+Python: conda env from ../environment.yml.
 
-R: 4.5.2
+Tested on Sep 3, 2026 - MacBook Pro M4 Max, 32GB, macOS 26.1, R 4.5.3, Python 3.10.

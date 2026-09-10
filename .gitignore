@@ -7,3 +7,8 @@ __pycache__
 .DS_Store
 .idea
 geo-capital
+# not shared: paper drafts, superseded scripts, compiled extensions
+docs/
+**/old/
+*.so
+build/

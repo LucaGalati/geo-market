@@ -8,7 +8,7 @@ print('###################################################')
 print('Prepare data from LSEG Tick History...')
 print('###################################################\n')
 import src.d01_preprocessing.trth_summary
-import src.d01_preprocessing.trth_streamed
+import src.d01_preprocessing.trth
 
 
 print('###################################################')

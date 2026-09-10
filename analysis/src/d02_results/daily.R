@@ -18,9 +18,14 @@ library(texreg)
 # --- IMPORT DATA ---
 ################################################################################
 
+source("~/Desktop/geo-market/analysis/R/requirements.R")
+library(arrow)
 DATA_ROOT <- "~/Desktop/geo-market/analysis/data"
-DAILY  <- file.path(DATA_ROOT, "daily_balanced_psm.csv") 
-df <- read.csv(DAILY)
+SAMPLE    <- "main"   # "main" (unbalanced) or "balanced" (perfectly balanced)
+df <- as.data.frame(read_parquet(file.path(DATA_ROOT, paste0("daily_", SAMPLE, ".parquet"))))
+psm <- as.data.frame(read_parquet(file.path(DATA_ROOT, "psm_assignments.parquet"),
+                                  col_select = c("ric", "matched_group", "eb_weight")))
+df <- merge(df, psm, by = "ric", all.x = TRUE)
 df$date <- as.Date(df$date)  
 df$postwar <- ifelse(df$date >= as.Date("2022-02-24"), 1, 0)
 df <- df %>% arrange(date)
@@ -47,13 +52,12 @@ df <- df %>%
     # --- Scaling of spreads and price measures ---
     qspread_mean = qspread_mean * 100,
     espread_mean = espread_mean * 100,
-    priceimpact_mean = priceimpact_mean * 100,
+    price_impact_mean = price_impact_mean * 100,
     
     # --- Inverse price and intraday volatility measures ---
     inv_price = if_else(price > 0, 1 / price, 0),
-    inv_price2 = if_else(price_mean > 0, 1 / price_mean, 0),
-    intra_vol_inv = if_else(intraday_vol_mean > 0, 1 / intraday_vol_mean, 0),
-    intra_vol5_inv = if_else(intraday_5m_vol_mean > 0, 1 / intraday_5m_vol_mean, 0),
+    intra_vol_inv = if_else(volatility > 0, 1 / volatility, 0),
+    intra_vol5_inv = if_else(log_volatility > 0, 1 / log_volatility, 0),
     
     # --- Log transformations ---
     log_dollar_volume = if_else(dollar_volume_sum > 0, log(dollar_volume_sum + 1), NA_real_),
@@ -69,18 +73,18 @@ df <- df %>%
     
     # --- Treatment intensity interactions (1st neighbours) ---
     treat_dist_intensity       = nbr_1_or_2 * treat_ukr_inv,
-    treat_vol_intensity        = nbr_1_or_2 * intraday_vol_mean,
-    treat_5m_vol_intensity     = nbr_1_or_2 * intraday_5m_vol_mean,
+    treat_vol_intensity        = nbr_1_or_2 * volatility,
+    treat_5m_vol_intensity     = nbr_1_or_2 * log_volatility,
     
     # --- Treatment intensity interactions (2nd neighbours) ---
     treat_dist_intensity1      = nbr_1 * treat_ukr_inv,
-    treat_vol_intensity1       = nbr_1 * intraday_vol_mean,
-    treat_5m_vol_intensity1    = nbr_1 * intraday_5m_vol_mean,
+    treat_vol_intensity1       = nbr_1 * volatility,
+    treat_5m_vol_intensity1    = nbr_1 * log_volatility,
     
     # --- Treatment intensity interactions (1st & 2nd neighbours) ---
     treat_dist_intensity2      = nbr_2 * treat_ukr_inv,
-    treat_vol_intensity2       = nbr_2 * intraday_vol_mean,
-    treat_5m_vol_intensity2    = nbr_2 * intraday_5m_vol_mean
+    treat_vol_intensity2       = nbr_2 * volatility,
+    treat_5m_vol_intensity2    = nbr_2 * log_volatility
   )
 
 df <- df %>% 
@@ -114,7 +118,7 @@ df <- df %>%
 # create panel dataset
 dfp <- pdata.frame(df, index = c("ric", "date"))
 # matched control sample
-df2 <- df[df$psm_group %in% c(0, 1) & !is.na(df$psm_group), ]
+df2 <- df[df$matched_group %in% c(0, 1) & !is.na(df$matched_group), ]
 dfp2 <- pdata.frame(df2, index = c("ric", "date"))
 
 
@@ -152,60 +156,60 @@ get_n <- function(m) nobs(m)
 
 ####################### Intraday Volatility (Open-Close) #######################
 
-model_vol01 <- plm(log(intraday_vol_mean+1) ~ postwar, 
+model_vol01 <- plm(log(volatility+1) ~ postwar, 
                    data = dfp, model = "within", effect = "individual")
 summary(model_vol01)
 coeftest(model_vol01, vcov. = vcovHC(model_vol01, type = "HC0"))
 
-model_vol02 <- plm(log(intraday_vol_mean+1) ~ postwar + log(mktval) + inv_price  + log(quotes_count), 
+model_vol02 <- plm(log(volatility+1) ~ postwar + log(mktval) + inv_price  + log(quotes_count), 
                    data = dfp, model = "within", effect = "individual")
 summary(model_vol02)
 coeftest(model_vol02, vcov. = vcovHC(model_vol02, type = "HC0"))
 
 ###
 
-model_vol03 <- plm(log(intraday_vol_mean+1) ~ nbr_1 * postwar, 
+model_vol03 <- plm(log(volatility+1) ~ nbr_1 * postwar, 
                    data = dfp, model = "within", effect = "twoways")
 summary(model_vol03)
 coeftest(model_vol03, vcov. = vcovDC(model_vol03, type = "HC0"))
 
-model_vol04 <- plm(log(intraday_vol_mean+1) ~ nbr_1 * postwar + log(mktval) + inv_price + log(quotes_count), 
+model_vol04 <- plm(log(volatility+1) ~ nbr_1 * postwar + log(mktval) + inv_price + log(quotes_count), 
                    data = dfp, model = "within", effect = "twoways")
 summary(model_vol04)
 coeftest(model_vol04, vcov. = vcovDC(model_vol04, type = "HC0"))
 
 ###
 
-model_vol05 <- plm(log(intraday_vol_mean+1) ~ nbr_2 * postwar, 
+model_vol05 <- plm(log(volatility+1) ~ nbr_2 * postwar, 
                    data = dfp, model = "within", effect = "twoways")
 summary(model_vol05)
 coeftest(model_vol05, vcov. = vcovDC(model_vol05, type = "HC0"))
 
-model_vol06 <- plm(log(intraday_vol_mean+1) ~ nbr_2 * postwar + log(mktval) + inv_price + log(quotes_count), 
+model_vol06 <- plm(log(volatility+1) ~ nbr_2 * postwar + log(mktval) + inv_price + log(quotes_count), 
                    data = dfp, model = "within", effect = "twoways")
 summary(model_vol06)
 coeftest(model_vol06, vcov. = vcovDC(model_vol06, type = "HC0"))
 
 ###
 
-model_vol07 <- plm(log(intraday_vol_mean+1) ~ nbr_1_or_2 * postwar, 
+model_vol07 <- plm(log(volatility+1) ~ nbr_1_or_2 * postwar, 
                    data = dfp, model = "within", effect = "twoways")
 summary(model_vol07)
 coeftest(model_vol07, vcov. = vcovDC(model_vol07, type = "HC0"))
 
-model_vol08 <- plm(log(intraday_vol_mean+1) ~ nbr_1_or_2 * postwar + log(mktval) + inv_price + log(quotes_count), 
+model_vol08 <- plm(log(volatility+1) ~ nbr_1_or_2 * postwar + log(mktval) + inv_price + log(quotes_count), 
                    data = dfp, model = "within", effect = "twoways")
 summary(model_vol08)
 coeftest(model_vol08, vcov. = vcovDC(model_vol08, type = "HC0"))
 
 ###
 
-model_vol09 <- plm(log(intraday_vol_mean+1) ~ log(treat_ukr_inv) * postwar, 
+model_vol09 <- plm(log(volatility+1) ~ log(treat_ukr_inv) * postwar, 
                    data = dfp, model = "within", effect = "twoways")
 summary(model_vol09)
 coeftest(model_vol09, vcov. = vcovDC(model_vol09, type = "HC0"))
 
-model_vol10 <- plm(log(intraday_vol_mean+1) ~ log(treat_ukr_inv) * postwar + log(mktval) + inv_price + log(quotes_count), 
+model_vol10 <- plm(log(volatility+1) ~ log(treat_ukr_inv) * postwar + log(mktval) + inv_price + log(quotes_count), 
                    data = dfp, model = "within", effect = "twoways")
 summary(model_vol10)
 coeftest(model_vol10, vcov. = vcovDC(model_vol10, type = "HC0"))
@@ -213,60 +217,60 @@ coeftest(model_vol10, vcov. = vcovDC(model_vol10, type = "HC0"))
 
 ######################## Intraday Volatility (5-Minute) ########################
 
-model_5m_vol01 <- plm(log(intraday_5m_vol_mean+1) ~ postwar, 
+model_5m_vol01 <- plm(log(log_volatility+1) ~ postwar, 
                       data = dfp, model = "within", effect = "individual")
 summary(model_5m_vol01)
 coeftest(model_5m_vol01, vcov. = vcovHC(model_5m_vol01, type = "HC0"))
 
-model_5m_vol02 <- plm(log(intraday_5m_vol_mean+1) ~ postwar + log(mktval) + inv_price  + log(quotes_count), 
+model_5m_vol02 <- plm(log(log_volatility+1) ~ postwar + log(mktval) + inv_price  + log(quotes_count), 
                       data = dfp, model = "within", effect = "individual")
 summary(model_5m_vol02)
 coeftest(model_5m_vol02, vcov. = vcovHC(model_5m_vol02, type = "HC0"))
 
 ###
 
-model_5m_vol03 <- plm(log(intraday_5m_vol_mean+1) ~ nbr_1 * postwar, 
+model_5m_vol03 <- plm(log(log_volatility+1) ~ nbr_1 * postwar, 
                       data = dfp, model = "within", effect = "twoways")
 summary(model_5m_vol03)
 coeftest(model_5m_vol03, vcov. = vcovDC(model_5m_vol03, type = "HC0"))
 
-model_5m_vol04 <- plm(log(intraday_5m_vol_mean+1) ~ nbr_1 * postwar + log(mktval) + inv_price + log(quotes_count), 
+model_5m_vol04 <- plm(log(log_volatility+1) ~ nbr_1 * postwar + log(mktval) + inv_price + log(quotes_count), 
                       data = dfp, model = "within", effect = "twoways")
 summary(model_5m_vol04)
 coeftest(model_5m_vol04, vcov. = vcovDC(model_5m_vol04, type = "HC0"))
 
 ###
 
-model_5m_vol05 <- plm(log(intraday_5m_vol_mean+1) ~ nbr_2 * postwar, 
+model_5m_vol05 <- plm(log(log_volatility+1) ~ nbr_2 * postwar, 
                       data = dfp, model = "within", effect = "twoways")
 summary(model_5m_vol05)
 coeftest(model_5m_vol05, vcov. = vcovDC(model_5m_vol05, type = "HC0"))
 
-model_5m_vol06 <- plm(log(intraday_5m_vol_mean+1) ~ nbr_2 * postwar + log(mktval) + inv_price + log(quotes_count), 
+model_5m_vol06 <- plm(log(log_volatility+1) ~ nbr_2 * postwar + log(mktval) + inv_price + log(quotes_count), 
                       data = dfp, model = "within", effect = "twoways")
 summary(model_5m_vol06)
 coeftest(model_5m_vol06, vcov. = vcovDC(model_5m_vol06, type = "HC0"))
 
 ###
 
-model_5m_vol07 <- plm(log(intraday_5m_vol_mean+1) ~ nbr_1_or_2 * postwar, 
+model_5m_vol07 <- plm(log(log_volatility+1) ~ nbr_1_or_2 * postwar, 
                       data = dfp, model = "within", effect = "twoways")
 summary(model_5m_vol07)
 coeftest(model_5m_vol07, vcov. = vcovDC(model_5m_vol07, type = "HC0"))
 
-model_5m_vol08 <- plm(log(intraday_5m_vol_mean+1) ~ nbr_1_or_2 * postwar + log(mktval) + inv_price + log(quotes_count), 
+model_5m_vol08 <- plm(log(log_volatility+1) ~ nbr_1_or_2 * postwar + log(mktval) + inv_price + log(quotes_count), 
                       data = dfp, model = "within", effect = "twoways")
 summary(model_5m_vol08)
 coeftest(model_5m_vol08, vcov. = vcovDC(model_5m_vol08, type = "HC0"))
 
 ###
 
-model_5m_vol09 <- plm(log(intraday_5m_vol_mean+1) ~ log(treat_ukr_inv) * postwar, 
+model_5m_vol09 <- plm(log(log_volatility+1) ~ log(treat_ukr_inv) * postwar, 
                       data = dfp, model = "within", effect = "twoways")
 summary(model_5m_vol09)
 coeftest(model_5m_vol09, vcov. = vcovDC(model_5m_vol09, type = "HC0"))
 
-model_5m_vol10 <- plm(log(intraday_5m_vol_mean+1) ~ log(treat_ukr_inv) * postwar + log(mktval) + inv_price + log(quotes_count), 
+model_5m_vol10 <- plm(log(log_volatility+1) ~ log(treat_ukr_inv) * postwar + log(mktval) + inv_price + log(quotes_count), 
                       data = dfp, model = "within", effect = "twoways")
 summary(model_5m_vol10)
 coeftest(model_5m_vol10, vcov. = vcovDC(model_5m_vol10, type = "HC0"))
@@ -400,60 +404,60 @@ message("✅ LaTeX table written to risk_models.tex")
 
 ####################### Intraday Volatility (Open-Close) #######################
 
-model_vol01 <- plm(log(intraday_vol_mean+1) ~ postwar, 
+model_vol01 <- plm(log(volatility+1) ~ postwar, 
                    data = dfp2, model = "within", effect = "individual")
 summary(model_vol01)
 coeftest(model_vol01, vcov. = vcovHC(model_vol01, type = "HC0"))
 
-model_vol02 <- plm(log(intraday_vol_mean+1) ~ postwar + log(mktval) + inv_price  + log(quotes_count), 
+model_vol02 <- plm(log(volatility+1) ~ postwar + log(mktval) + inv_price  + log(quotes_count), 
                    data = dfp2, model = "within", effect = "individual")
 summary(model_vol02)
 coeftest(model_vol02, vcov. = vcovHC(model_vol02, type = "HC0"))
 
 ###
 
-model_vol03 <- plm(log(intraday_vol_mean+1) ~ nbr_1 * postwar, 
+model_vol03 <- plm(log(volatility+1) ~ nbr_1 * postwar, 
                    data = dfp2, model = "within", effect = "twoways")
 summary(model_vol03)
 coeftest(model_vol03, vcov. = vcovDC(model_vol03, type = "HC0"))
 
-model_vol04 <- plm(log(intraday_vol_mean+1) ~ nbr_1 * postwar + log(mktval) + inv_price + log(quotes_count), 
+model_vol04 <- plm(log(volatility+1) ~ nbr_1 * postwar + log(mktval) + inv_price + log(quotes_count), 
                    data = dfp2, model = "within", effect = "twoways")
 summary(model_vol04)
 coeftest(model_vol04, vcov. = vcovDC(model_vol04, type = "HC0"))
 
 ###
 
-model_vol05 <- plm(log(intraday_vol_mean+1) ~ nbr_2 * postwar, 
+model_vol05 <- plm(log(volatility+1) ~ nbr_2 * postwar, 
                    data = dfp2, model = "within", effect = "twoways")
 summary(model_vol05)
 coeftest(model_vol05, vcov. = vcovDC(model_vol05, type = "HC0"))
 
-model_vol06 <- plm(log(intraday_vol_mean+1) ~ nbr_2 * postwar + log(mktval) + inv_price + log(quotes_count), 
+model_vol06 <- plm(log(volatility+1) ~ nbr_2 * postwar + log(mktval) + inv_price + log(quotes_count), 
                    data = dfp2, model = "within", effect = "twoways")
 summary(model_vol06)
 coeftest(model_vol06, vcov. = vcovDC(model_vol06, type = "HC0"))
 
 ###
 
-model_vol07 <- plm(log(intraday_vol_mean+1) ~ nbr_1_or_2 * postwar, 
+model_vol07 <- plm(log(volatility+1) ~ nbr_1_or_2 * postwar, 
                    data = dfp2, model = "within", effect = "twoways")
 summary(model_vol07)
 coeftest(model_vol07, vcov. = vcovDC(model_vol07, type = "HC0"))
 
-model_vol08 <- plm(log(intraday_vol_mean+1) ~ nbr_1_or_2 * postwar + log(mktval) + inv_price + log(quotes_count), 
+model_vol08 <- plm(log(volatility+1) ~ nbr_1_or_2 * postwar + log(mktval) + inv_price + log(quotes_count), 
                    data = dfp2, model = "within", effect = "twoways")
 summary(model_vol08)
 coeftest(model_vol08, vcov. = vcovDC(model_vol08, type = "HC0"))
 
 ###
 
-model_vol09 <- plm(log(intraday_vol_mean+1) ~ log(treat_ukr_inv) * postwar, 
+model_vol09 <- plm(log(volatility+1) ~ log(treat_ukr_inv) * postwar, 
                    data = dfp2, model = "within", effect = "twoways")
 summary(model_vol09)
 coeftest(model_vol09, vcov. = vcovDC(model_vol09, type = "HC0"))
 
-model_vol10 <- plm(log(intraday_vol_mean+1) ~ log(treat_ukr_inv) * postwar + log(mktval) + inv_price + log(quotes_count), 
+model_vol10 <- plm(log(volatility+1) ~ log(treat_ukr_inv) * postwar + log(mktval) + inv_price + log(quotes_count), 
                    data = dfp2, model = "within", effect = "twoways")
 summary(model_vol10)
 coeftest(model_vol10, vcov. = vcovDC(model_vol10, type = "HC0"))
@@ -461,60 +465,60 @@ coeftest(model_vol10, vcov. = vcovDC(model_vol10, type = "HC0"))
 
 ######################## Intraday Volatility (5-Minute) ########################
 
-model_5m_vol01 <- plm(log(intraday_5m_vol_mean+1) ~ postwar, 
+model_5m_vol01 <- plm(log(log_volatility+1) ~ postwar, 
                       data = dfp2, model = "within", effect = "individual")
 summary(model_5m_vol01)
 coeftest(model_5m_vol01, vcov. = vcovHC(model_5m_vol01, type = "HC0"))
 
-model_5m_vol02 <- plm(log(intraday_5m_vol_mean+1) ~ postwar + log(mktval) + inv_price  + log(quotes_count), 
+model_5m_vol02 <- plm(log(log_volatility+1) ~ postwar + log(mktval) + inv_price  + log(quotes_count), 
                       data = dfp2, model = "within", effect = "individual")
 summary(model_5m_vol02)
 coeftest(model_5m_vol02, vcov. = vcovHC(model_5m_vol02, type = "HC0"))
 
 ###
 
-model_5m_vol03 <- plm(log(intraday_5m_vol_mean+1) ~ nbr_1 * postwar, 
+model_5m_vol03 <- plm(log(log_volatility+1) ~ nbr_1 * postwar, 
                       data = dfp2, model = "within", effect = "twoways")
 summary(model_5m_vol03)
 coeftest(model_5m_vol03, vcov. = vcovDC(model_5m_vol03, type = "HC0"))
 
-model_5m_vol04 <- plm(log(intraday_5m_vol_mean+1) ~ nbr_1 * postwar + log(mktval) + inv_price + log(quotes_count), 
+model_5m_vol04 <- plm(log(log_volatility+1) ~ nbr_1 * postwar + log(mktval) + inv_price + log(quotes_count), 
                       data = dfp2, model = "within", effect = "twoways")
 summary(model_5m_vol04)
 coeftest(model_5m_vol04, vcov. = vcovDC(model_5m_vol04, type = "HC0"))
 
 ###
 
-model_5m_vol05 <- plm(log(intraday_5m_vol_mean+1) ~ nbr_2 * postwar, 
+model_5m_vol05 <- plm(log(log_volatility+1) ~ nbr_2 * postwar, 
                       data = dfp2, model = "within", effect = "twoways")
 summary(model_5m_vol05)
 coeftest(model_5m_vol05, vcov. = vcovDC(model_5m_vol05, type = "HC0"))
 
-model_5m_vol06 <- plm(log(intraday_5m_vol_mean+1) ~ nbr_2 * postwar + log(mktval) + inv_price + log(quotes_count), 
+model_5m_vol06 <- plm(log(log_volatility+1) ~ nbr_2 * postwar + log(mktval) + inv_price + log(quotes_count), 
                       data = dfp2, model = "within", effect = "twoways")
 summary(model_5m_vol06)
 coeftest(model_5m_vol06, vcov. = vcovDC(model_5m_vol06, type = "HC0"))
 
 ###
 
-model_5m_vol07 <- plm(log(intraday_5m_vol_mean+1) ~ nbr_1_or_2 * postwar, 
+model_5m_vol07 <- plm(log(log_volatility+1) ~ nbr_1_or_2 * postwar, 
                       data = dfp2, model = "within", effect = "twoways")
 summary(model_5m_vol07)
 coeftest(model_5m_vol07, vcov. = vcovDC(model_5m_vol07, type = "HC0"))
 
-model_5m_vol08 <- plm(log(intraday_5m_vol_mean+1) ~ nbr_1_or_2 * postwar + log(mktval) + inv_price + log(quotes_count), 
+model_5m_vol08 <- plm(log(log_volatility+1) ~ nbr_1_or_2 * postwar + log(mktval) + inv_price + log(quotes_count), 
                       data = dfp2, model = "within", effect = "twoways")
 summary(model_5m_vol08)
 coeftest(model_5m_vol08, vcov. = vcovDC(model_5m_vol08, type = "HC0"))
 
 ###
 
-model_5m_vol09 <- plm(log(intraday_5m_vol_mean+1) ~ log(treat_ukr_inv) * postwar, 
+model_5m_vol09 <- plm(log(log_volatility+1) ~ log(treat_ukr_inv) * postwar, 
                       data = dfp2, model = "within", effect = "twoways")
 summary(model_5m_vol09)
 coeftest(model_5m_vol09, vcov. = vcovDC(model_5m_vol09, type = "HC0"))
 
-model_5m_vol10 <- plm(log(intraday_5m_vol_mean+1) ~ log(treat_ukr_inv) * postwar + log(mktval) + inv_price + log(quotes_count), 
+model_5m_vol10 <- plm(log(log_volatility+1) ~ log(treat_ukr_inv) * postwar + log(mktval) + inv_price + log(quotes_count), 
                       data = dfp2, model = "within", effect = "twoways")
 summary(model_5m_vol10)
 coeftest(model_5m_vol10, vcov. = vcovDC(model_5m_vol10, type = "HC0"))
@@ -690,12 +694,12 @@ model_qspread08 <- plm(qspread_mean ~ treat_ukr_inv * postwar + log(mktval) + in
 summary(model_qspread08)
 coeftest(model_qspread08, vcov. = vcovDC(model_qspread08, type = "HC0"))
 
-model_qspread09 <- plm(qspread_mean ~ intraday_vol_mean * postwar, 
+model_qspread09 <- plm(qspread_mean ~ volatility * postwar, 
                        data = dfp, model = "within", effect = "twoways")
 summary(model_qspread09)
 coeftest(model_qspread09, vcov. = vcovDC(model_qspread09, type = "HC0"))
 
-model_qspread10 <- plm(qspread_mean ~ intraday_vol_mean * postwar + log(mktval) + inv_price + log(quotes_count), 
+model_qspread10 <- plm(qspread_mean ~ volatility * postwar + log(mktval) + inv_price + log(quotes_count), 
                       data = dfp, model = "within", effect = "twoways")
 summary(model_qspread10)
 coeftest(model_qspread10, vcov. = vcovDC(model_qspread10, type = "HC0"))
@@ -783,12 +787,12 @@ model_espread08 <- plm(espread_mean ~ treat_ukr_inv * postwar + log(mktval) + in
 summary(model_espread08)
 coeftest(model_espread08, vcov. = vcovDC(model_espread08, type = "HC0"))
 
-model_espread09 <- plm(espread_mean ~ intraday_vol_mean * postwar, 
+model_espread09 <- plm(espread_mean ~ volatility * postwar, 
                        data = dfp, model = "within", effect = "twoways")
 summary(model_espread09)
 coeftest(model_espread09, vcov. = vcovDC(model_espread09, type = "HC0"))
 
-model_espread10 <- plm(espread_mean ~ intraday_vol_mean * postwar + log(mktval) + inv_price + log(quotes_count), 
+model_espread10 <- plm(espread_mean ~ volatility * postwar + log(mktval) + inv_price + log(quotes_count), 
                        data = dfp, model = "within", effect = "twoways")
 summary(model_espread10)
 coeftest(model_espread10, vcov. = vcovDC(model_espread10, type = "HC0"))
@@ -876,12 +880,12 @@ model_dvolume08 <- plm(log(dollar_volume_sum+1) ~ treat_ukr_inv * postwar + log(
 summary(model_dvolume08)
 coeftest(model_dvolume08, vcov. = vcovDC(model_dvolume08, type = "HC0"))
 
-model_dvolume09 <- plm(log(dollar_volume_sum+1) ~ intraday_vol_mean * postwar, 
+model_dvolume09 <- plm(log(dollar_volume_sum+1) ~ volatility * postwar, 
                        data = dfp, model = "within", effect = "twoways")
 summary(model_dvolume09)
 coeftest(model_dvolume09, vcov. = vcovDC(model_dvolume09, type = "HC0"))
 
-model_dvolume10 <- plm(log(dollar_volume_sum+1) ~ intraday_vol_mean * postwar + log(mktval) + inv_price + log(quotes_count), 
+model_dvolume10 <- plm(log(dollar_volume_sum+1) ~ volatility * postwar + log(mktval) + inv_price + log(quotes_count), 
                        data = dfp, model = "within", effect = "twoways")
 summary(model_dvolume10)
 coeftest(model_dvolume10, vcov. = vcovDC(model_dvolume10, type = "HC0"))
@@ -969,12 +973,12 @@ model_trades08 <- plm(log(trades_count+1) ~ treat_ukr_inv * postwar + log(mktval
 summary(model_trades08)
 coeftest(model_trades08, vcov. = vcovDC(model_trades08, type = "HC0"))
 
-model_trades09 <- plm(log(trades_count+1) ~ intraday_vol_mean * postwar, 
+model_trades09 <- plm(log(trades_count+1) ~ volatility * postwar, 
                       data = dfp, model = "within", effect = "twoways")
 summary(model_trades09)
 coeftest(model_trades09, vcov. = vcovDC(model_trades09, type = "HC0"))
 
-model_trades10 <- plm(log(trades_count+1) ~ intraday_vol_mean * postwar + log(mktval) + inv_price + log(quotes_count), 
+model_trades10 <- plm(log(trades_count+1) ~ volatility * postwar + log(mktval) + inv_price + log(quotes_count), 
                       data = dfp, model = "within", effect = "twoways")
 summary(model_trades10)
 coeftest(model_trades10, vcov. = vcovDC(model_trades10, type = "HC0"))
@@ -1443,7 +1447,7 @@ make_2model_multiy_table(
 make_2model_multiy_table(
   filename = "volatility_models.tex",
   panels = panel_volatility,
-  treat_term = "intraday_vol_mean:postwar",
+  treat_term = "volatility:postwar",
   treat_label = "$Volatility_{OC} \\times War$",
   table_caption = "Difference-in-differences regression results for Overall Sample: Volatility. Double-clustered robust SEs in parentheses. $^{***}$, $^{**}$, and $^{*}$ indicate 1\\%, 5\\%, 10\\% significance."
 )
@@ -1497,12 +1501,12 @@ model_qspread08 <- plm(qspread_mean ~ treat_ukr_inv * postwar + log(mktval) + in
 summary(model_qspread08)
 coeftest(model_qspread08, vcov. = vcovDC(model_qspread08, type = "HC0"))
 
-model_qspread09 <- plm(qspread_mean ~ intraday_vol_mean * postwar, 
+model_qspread09 <- plm(qspread_mean ~ volatility * postwar, 
                        data = dfp2, model = "within", effect = "twoways")
 summary(model_qspread09)
 coeftest(model_qspread09, vcov. = vcovDC(model_qspread09, type = "HC0"))
 
-model_qspread10 <- plm(qspread_mean ~ intraday_vol_mean * postwar + log(mktval) + inv_price + log(quotes_count), 
+model_qspread10 <- plm(qspread_mean ~ volatility * postwar + log(mktval) + inv_price + log(quotes_count), 
                        data = dfp2, model = "within", effect = "twoways")
 summary(model_qspread10)
 coeftest(model_qspread10, vcov. = vcovDC(model_qspread10, type = "HC0"))
@@ -1590,12 +1594,12 @@ model_espread08 <- plm(espread_mean ~ treat_ukr_inv * postwar + log(mktval) + in
 summary(model_espread08)
 coeftest(model_espread08, vcov. = vcovDC(model_espread08, type = "HC0"))
 
-model_espread09 <- plm(espread_mean ~ intraday_vol_mean * postwar, 
+model_espread09 <- plm(espread_mean ~ volatility * postwar, 
                        data = dfp2, model = "within", effect = "twoways")
 summary(model_espread09)
 coeftest(model_espread09, vcov. = vcovDC(model_espread09, type = "HC0"))
 
-model_espread10 <- plm(espread_mean ~ intraday_vol_mean * postwar + log(mktval) + inv_price + log(quotes_count), 
+model_espread10 <- plm(espread_mean ~ volatility * postwar + log(mktval) + inv_price + log(quotes_count), 
                        data = dfp2, model = "within", effect = "twoways")
 summary(model_espread10)
 coeftest(model_espread10, vcov. = vcovDC(model_espread10, type = "HC0"))
@@ -1683,12 +1687,12 @@ model_dvolume08 <- plm(log(dollar_volume_sum+1) ~ treat_ukr_inv * postwar + log(
 summary(model_dvolume08)
 coeftest(model_dvolume08, vcov. = vcovDC(model_dvolume08, type = "HC0"))
 
-model_dvolume09 <- plm(log(dollar_volume_sum+1) ~ intraday_vol_mean * postwar, 
+model_dvolume09 <- plm(log(dollar_volume_sum+1) ~ volatility * postwar, 
                        data = dfp2, model = "within", effect = "twoways")
 summary(model_dvolume09)
 coeftest(model_dvolume09, vcov. = vcovDC(model_dvolume09, type = "HC0"))
 
-model_dvolume10 <- plm(log(dollar_volume_sum+1) ~ intraday_vol_mean * postwar + log(mktval) + inv_price + log(quotes_count), 
+model_dvolume10 <- plm(log(dollar_volume_sum+1) ~ volatility * postwar + log(mktval) + inv_price + log(quotes_count), 
                        data = dfp2, model = "within", effect = "twoways")
 summary(model_dvolume10)
 coeftest(model_dvolume10, vcov. = vcovDC(model_dvolume10, type = "HC0"))
@@ -1776,12 +1780,12 @@ model_trades08 <- plm(log(trades_count+1) ~ treat_ukr_inv * postwar + log(mktval
 summary(model_trades08)
 coeftest(model_trades08, vcov. = vcovDC(model_trades08, type = "HC0"))
 
-model_trades09 <- plm(log(trades_count+1) ~ intraday_vol_mean * postwar, 
+model_trades09 <- plm(log(trades_count+1) ~ volatility * postwar, 
                       data = dfp2, model = "within", effect = "twoways")
 summary(model_trades09)
 coeftest(model_trades09, vcov. = vcovDC(model_trades09, type = "HC0"))
 
-model_trades10 <- plm(log(trades_count+1) ~ intraday_vol_mean * postwar + log(mktval) + inv_price + log(quotes_count), 
+model_trades10 <- plm(log(trades_count+1) ~ volatility * postwar + log(mktval) + inv_price + log(quotes_count), 
                       data = dfp2, model = "within", effect = "twoways")
 summary(model_trades10)
 coeftest(model_trades10, vcov. = vcovDC(model_trades10, type = "HC0"))
@@ -2240,7 +2244,7 @@ make_2model_multiy_table(
 make_2model_multiy_table(
   filename = "volatility_models_psm.tex",
   panels = panel_volatility,
-  treat_term = "intraday_vol_mean:postwar",
+  treat_term = "volatility:postwar",
   treat_label = "$Volatility_{OC} \\times War$",
   table_caption = "Difference-in-differences regression results for Matched Sample: Volatility. Double-clustered robust SEs in parentheses. $^{***}$, $^{**}$, and $^{*}$ indicate 1\\%, 5\\%, 10\\% significance."
 )

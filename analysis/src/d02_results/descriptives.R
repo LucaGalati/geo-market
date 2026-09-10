@@ -19,9 +19,15 @@ library(tibble)
 # --- IMPORT DATA ---
 ################################################################################
 
+source("~/Desktop/geo-market/analysis/R/requirements.R")
+library(arrow)
 DATA_ROOT <- "~/Desktop/geo-market/analysis/data"
-DAILY  <- file.path(DATA_ROOT, "daily_balanced_psm.csv") 
-df <- read.csv(DAILY)  
+SAMPLE    <- "main"   # "main" (unbalanced) or "balanced" (perfectly balanced)
+df <- as.data.frame(read_parquet(file.path(DATA_ROOT, paste0("daily_", SAMPLE, ".parquet"))))
+psm <- as.data.frame(read_parquet(file.path(DATA_ROOT, "psm_assignments.parquet"),
+                                  col_select = c("ric", "matched_group", "eb_weight")))
+df <- merge(df, psm, by = "ric", all.x = TRUE)
+df$date <- as.Date(df$date)
 df$postwar <- ifelse(df$date >= as.Date("2022-02-24"), 1, 0)
 df <- df %>% arrange(date)
 event_date <- as.Date("2022-02-24")
@@ -47,20 +53,19 @@ df <- df %>%
     # --- Scaling of spreads and price measures ---
     qspread_mean = qspread_mean * 100,
     espread_mean = espread_mean * 100,
-    priceimpact_mean = priceimpact_mean * 100,
+    price_impact_mean = price_impact_mean * 100,
     
     # --- Inverse price and intraday volatility measures ---
     inv_price = if_else(price > 0, 1 / price, 0),
-    inv_price2 = if_else(price_mean > 0, 1 / price_mean, 0),
-    intra_vol_inv = if_else(intraday_vol_mean > 0, 1 / intraday_vol_mean, 0),
-    intra_vol5_inv = if_else(intraday_5m_vol_mean > 0, 1 / intraday_5m_vol_mean, 0),
+    intra_vol_inv = if_else(volatility > 0, 1 / volatility, 0),
+    intra_vol5_inv = if_else(log_volatility > 0, 1 / log_volatility, 0),
     
     # --- Log transformations ---
     log_dollar_volume = if_else(dollar_volume_sum > 0, log(dollar_volume_sum + 1), NA_real_),
     log_trades_count = if_else(trades_count > 0, log(trades_count), NA_real_),
     log_mktval = log(mktval),
     log_quotes_count = if_else(quotes_count > 0, log(quotes_count), NA_real_),
-    log_intraday_vol_mean = if_else(intraday_vol_mean > 0, log(intraday_vol_mean), NA_real_),
+    log_volatility = if_else(volatility > 0, log(volatility), NA_real_),
     
     # --- Millions transformations ---
     dollar_volume_mln = if_else(dollar_volume_sum > 0, dollar_volume_sum / 1e6, NA_real_),
@@ -70,18 +75,18 @@ df <- df %>%
     
     # --- Treatment intensity interactions (1st neighbours) ---
     treat_dist_intensity       = nbr_1_or_2 * treat_ukr_inv,
-    treat_vol_intensity        = nbr_1_or_2 * intraday_vol_mean,
-    treat_5m_vol_intensity     = nbr_1_or_2 * intraday_5m_vol_mean,
+    treat_vol_intensity        = nbr_1_or_2 * volatility,
+    treat_5m_vol_intensity     = nbr_1_or_2 * log_volatility,
     
     # --- Treatment intensity interactions (2nd neighbours) ---
     treat_dist_intensity1      = nbr_1 * treat_ukr_inv,
-    treat_vol_intensity1       = nbr_1 * intraday_vol_mean,
-    treat_5m_vol_intensity1    = nbr_1 * intraday_5m_vol_mean,
+    treat_vol_intensity1       = nbr_1 * volatility,
+    treat_5m_vol_intensity1    = nbr_1 * log_volatility,
     
     # --- Treatment intensity interactions (1st & 2nd neighbours) ---
     treat_dist_intensity2      = nbr_2 * treat_ukr_inv,
-    treat_vol_intensity2       = nbr_2 * intraday_vol_mean,
-    treat_5m_vol_intensity2    = nbr_2 * intraday_5m_vol_mean
+    treat_vol_intensity2       = nbr_2 * volatility,
+    treat_5m_vol_intensity2    = nbr_2 * log_volatility
   )
 
 df <- df %>% 
@@ -115,7 +120,7 @@ df <- df %>%
 # create panel dataset
 dfp <- pdata.frame(df, index = c("ric", "date"))
 # matched control sample
-df2 <- df[df$psm_group %in% c(0, 1) & !is.na(df$psm_group), ]
+df2 <- df[df$matched_group %in% c(0, 1) & !is.na(df$matched_group), ]
 dfp2 <- pdata.frame(df2, index = c("ric", "date"))
 
 
@@ -130,7 +135,7 @@ dfp2 <- pdata.frame(df2, index = c("ric", "date"))
 vars <- c("qspread_mean", "espread_mean", "log_dollar_volume", "log_trades_count", 
           "log_mktval", "inv_price", "log_quotes_count", "nbr_1", "nbr_2", 
           "nbr_1_or_2", "treat_ukr_inv", "treat_economic",
-          "intraday_vol_mean")#, "intraday_5m_vol_mean")
+          "volatility")#, "log_volatility")
 
 labels <- c("Quoted Spread (%)", "Effective Spread (%)", "Dollar Volume (log)",
             "Number of Trades (log)", "Market Value (log)",
@@ -235,7 +240,7 @@ message("✅ LaTeX descriptive statistics table created: descriptive_stats.tex")
 # Y variables (as per your specs)
 y_vars <- c("qspread_mean", "espread_mean", 
             "log_dollar_volume", "log_trades_count", 
-            "intraday_vol_mean")
+            "volatility")
 
 y_labels <- c("Quoted Spread (\\%)", "Effective Spread (\\%)",
               "Dollar Volume (log)", "Number of Trades (log)",
@@ -513,7 +518,7 @@ message("✅ Table 2 created successfully: mean_comparisons.tex")
 vars <- c("qspread_mean", "espread_mean", "log_dollar_volume", "log_trades_count", 
           "log_mktval", "inv_price", "log_quotes_count", "nbr_1", "nbr_2", 
           "nbr_1_or_2", "treat_ukr_inv", "treat_economic",
-          "intraday_vol_mean")#, "intraday_5m_vol_mean")
+          "volatility")#, "log_volatility")
 
 labels <- c("Quoted Spread (%)", "Effective Spread (%)", "Dollar Volume (log)",
             "Number of Trades (log)", "Market Value (log)",
@@ -618,7 +623,7 @@ message("✅ LaTeX descriptive statistics table created: descriptive_stats_psm.t
 # Y variables (as per your specs)
 y_vars <- c("qspread_mean", "espread_mean", 
             "log_dollar_volume", "log_trades_count", 
-            "intraday_vol_mean")
+            "volatility")
 
 y_labels <- c("Quoted Spread (\\%)", "Effective Spread (\\%)",
               "Dollar Volume (log)", "Number of Trades (log)",
@@ -924,12 +929,12 @@ pretrend_qspread_model04 <- plm(qspread_mean ~ log(treat_ukr_inv) * trend + log(
 summary(pretrend_qspread_model04)
 coeftest(pretrend_qspread_model04, vcov. = vcovDC(pretrend_qspread_model04, type = "HC0"))
 
-pretrend_qspread_model05 <- plm(qspread_mean ~ intraday_vol_mean * trend + log(mktval) + inv_price + log(quotes_count),
+pretrend_qspread_model05 <- plm(qspread_mean ~ volatility * trend + log(mktval) + inv_price + log(quotes_count),
                                 data = df_prep, model = "within", effect = "twoways")
 summary(pretrend_qspread_model05)
 coeftest(pretrend_qspread_model05, vcov. = vcovDC(pretrend_qspread_model05, type = "HC0"))
 
-pretrend_qspread_model06 <- plm(qspread_mean ~ intraday_5m_vol_mean * trend + log(mktval) + inv_price + log(quotes_count),
+pretrend_qspread_model06 <- plm(qspread_mean ~ log_volatility * trend + log(mktval) + inv_price + log(quotes_count),
                                 data = df_prep, model = "within", effect = "twoways")
 summary(pretrend_qspread_model06)
 coeftest(pretrend_qspread_model06, vcov. = vcovDC(pretrend_qspread_model06, type = "HC0"))
@@ -956,12 +961,12 @@ pretrend_espread_model04 <- plm(espread_mean ~ log(treat_ukr_inv) * trend + log(
 summary(pretrend_espread_model04)
 coeftest(pretrend_espread_model04, vcov. = vcovDC(pretrend_espread_model04, type = "HC0"))
 
-pretrend_espread_model05 <- plm(espread_mean ~ intraday_vol_mean * trend + log(mktval) + inv_price + log(quotes_count),
+pretrend_espread_model05 <- plm(espread_mean ~ volatility * trend + log(mktval) + inv_price + log(quotes_count),
                                 data = df_prep, model = "within", effect = "twoways")
 summary(pretrend_espread_model05)
 coeftest(pretrend_espread_model05, vcov. = vcovDC(pretrend_espread_model05, type = "HC0"))
 
-pretrend_espread_model06 <- plm(espread_mean ~ intraday_5m_vol_mean * trend + log(mktval) + inv_price + log(quotes_count),
+pretrend_espread_model06 <- plm(espread_mean ~ log_volatility * trend + log(mktval) + inv_price + log(quotes_count),
                                 data = df_prep, model = "within", effect = "twoways")
 summary(pretrend_espread_model06)
 coeftest(pretrend_espread_model06, vcov. = vcovDC(pretrend_espread_model06, type = "HC0"))
@@ -988,12 +993,12 @@ pretrend_dvolume_model04 <- plm(log(dollar_volume_sum+1) ~ log(treat_ukr_inv) * 
 summary(pretrend_dvolume_model04)
 coeftest(pretrend_dvolume_model04, vcov. = vcovDC(pretrend_dvolume_model04, type = "HC0"))
 
-pretrend_dvolume_model05 <- plm(log(dollar_volume_sum+1) ~ intraday_vol_mean * trend + log(mktval) + inv_price + log(quotes_count),
+pretrend_dvolume_model05 <- plm(log(dollar_volume_sum+1) ~ volatility * trend + log(mktval) + inv_price + log(quotes_count),
                                 data = df_prep, model = "within", effect = "twoways")
 summary(pretrend_dvolume_model05)
 coeftest(pretrend_dvolume_model05, vcov. = vcovDC(pretrend_dvolume_model05, type = "HC0"))
 
-pretrend_dvolume_model06 <- plm(log(dollar_volume_sum+1) ~ intraday_5m_vol_mean * trend + log(mktval) + inv_price + log(quotes_count),
+pretrend_dvolume_model06 <- plm(log(dollar_volume_sum+1) ~ log_volatility * trend + log(mktval) + inv_price + log(quotes_count),
                                 data = df_prep, model = "within", effect = "twoways")
 summary(pretrend_dvolume_model06)
 coeftest(pretrend_dvolume_model06, vcov. = vcovDC(pretrend_dvolume_model06, type = "HC0"))
@@ -1020,12 +1025,12 @@ pretrend_trades_model04 <- plm(log(trades_count) ~ log(treat_ukr_inv) * trend + 
 summary(pretrend_trades_model04)
 coeftest(pretrend_trades_model04, vcov. = vcovDC(pretrend_trades_model04, type = "HC0"))
 
-pretrend_trades_model05 <- plm(log(trades_count) ~ intraday_vol_mean * trend + log(mktval) + inv_price + log(quotes_count),
+pretrend_trades_model05 <- plm(log(trades_count) ~ volatility * trend + log(mktval) + inv_price + log(quotes_count),
                                data = df_prep, model = "within", effect = "twoways")
 summary(pretrend_trades_model05)
 coeftest(pretrend_trades_model05, vcov. = vcovDC(pretrend_trades_model05, type = "HC0"))
 
-pretrend_trades_model06 <- plm(log(trades_count) ~ intraday_5m_vol_mean * trend + log(mktval) + inv_price + log(quotes_count),
+pretrend_trades_model06 <- plm(log(trades_count) ~ log_volatility * trend + log(mktval) + inv_price + log(quotes_count),
                                data = df_prep, model = "within", effect = "twoways")
 summary(pretrend_trades_model06)
 coeftest(pretrend_trades_model06, vcov. = vcovDC(pretrend_trades_model06, type = "HC0"))
@@ -1079,7 +1084,7 @@ panelB_R <- list(pretrend_trades_model01,pretrend_trades_model02,pretrend_trades
                  pretrend_trades_model04,pretrend_trades_model05,pretrend_trades_model06)
 
 treat_terms <- c("nbr_1:trend","nbr_2:trend","nbr_1_or_2:trend",
-                 "log(treat_ukr_inv):trend","intraday_vol_mean:trend","intraday_5m_vol_mean")
+                 "log(treat_ukr_inv):trend","volatility:trend","log_volatility")
 treat_labels<- c("$Neighbour_1 \\times Trend$","$Neighbour_2 \\times Trend$","$Neighbour_{1-2} \\times Trend$",
                  "$Distance \\times Trend$","$Volatility_{OC} \\times Trend$","$Volatility_{5m} \\times Trend$")
 controls <- c("log(mktval)","inv_price","log(quotes_count)")
@@ -1214,12 +1219,12 @@ pretrend_qspread_model04 <- plm(qspread_mean ~ log(treat_ukr_inv) * trend + log(
 summary(pretrend_qspread_model04)
 coeftest(pretrend_qspread_model04, vcov. = vcovDC(pretrend_qspread_model04, type = "HC0"))
 
-pretrend_qspread_model05 <- plm(qspread_mean ~ intraday_vol_mean * trend + log(mktval) + inv_price + log(quotes_count),
+pretrend_qspread_model05 <- plm(qspread_mean ~ volatility * trend + log(mktval) + inv_price + log(quotes_count),
                                 data = df_prep2, model = "within", effect = "twoways")
 summary(pretrend_qspread_model05)
 coeftest(pretrend_qspread_model05, vcov. = vcovDC(pretrend_qspread_model05, type = "HC0"))
 
-pretrend_qspread_model06 <- plm(qspread_mean ~ intraday_5m_vol_mean * trend + log(mktval) + inv_price + log(quotes_count),
+pretrend_qspread_model06 <- plm(qspread_mean ~ log_volatility * trend + log(mktval) + inv_price + log(quotes_count),
                                 data = df_prep2, model = "within", effect = "twoways")
 summary(pretrend_qspread_model06)
 coeftest(pretrend_qspread_model06, vcov. = vcovDC(pretrend_qspread_model06, type = "HC0"))
@@ -1246,12 +1251,12 @@ pretrend_espread_model04 <- plm(espread_mean ~ log(treat_ukr_inv) * trend + log(
 summary(pretrend_espread_model04)
 coeftest(pretrend_espread_model04, vcov. = vcovDC(pretrend_espread_model04, type = "HC0"))
 
-pretrend_espread_model05 <- plm(espread_mean ~ intraday_vol_mean * trend + log(mktval) + inv_price + log(quotes_count),
+pretrend_espread_model05 <- plm(espread_mean ~ volatility * trend + log(mktval) + inv_price + log(quotes_count),
                                 data = df_prep2, model = "within", effect = "twoways")
 summary(pretrend_espread_model05)
 coeftest(pretrend_espread_model05, vcov. = vcovDC(pretrend_espread_model05, type = "HC0"))
 
-pretrend_espread_model06 <- plm(espread_mean ~ intraday_5m_vol_mean * trend + log(mktval) + inv_price + log(quotes_count),
+pretrend_espread_model06 <- plm(espread_mean ~ log_volatility * trend + log(mktval) + inv_price + log(quotes_count),
                                 data = df_prep2, model = "within", effect = "twoways")
 summary(pretrend_espread_model06)
 coeftest(pretrend_espread_model06, vcov. = vcovDC(pretrend_espread_model06, type = "HC0"))
@@ -1278,12 +1283,12 @@ pretrend_dvolume_model04 <- plm(log(dollar_volume_sum+1) ~ log(treat_ukr_inv) * 
 summary(pretrend_dvolume_model04)
 coeftest(pretrend_dvolume_model04, vcov. = vcovDC(pretrend_dvolume_model04, type = "HC0"))
 
-pretrend_dvolume_model05 <- plm(log(dollar_volume_sum+1) ~ intraday_vol_mean * trend + log(mktval) + inv_price + log(quotes_count),
+pretrend_dvolume_model05 <- plm(log(dollar_volume_sum+1) ~ volatility * trend + log(mktval) + inv_price + log(quotes_count),
                                 data = df_prep2, model = "within", effect = "twoways")
 summary(pretrend_dvolume_model05)
 coeftest(pretrend_dvolume_model05, vcov. = vcovDC(pretrend_dvolume_model05, type = "HC0"))
 
-pretrend_dvolume_model06 <- plm(log(dollar_volume_sum+1) ~ intraday_5m_vol_mean * trend + log(mktval) + inv_price + log(quotes_count),
+pretrend_dvolume_model06 <- plm(log(dollar_volume_sum+1) ~ log_volatility * trend + log(mktval) + inv_price + log(quotes_count),
                                 data = df_prep2, model = "within", effect = "twoways")
 summary(pretrend_dvolume_model06)
 coeftest(pretrend_dvolume_model06, vcov. = vcovDC(pretrend_dvolume_model06, type = "HC0"))
@@ -1310,12 +1315,12 @@ pretrend_trades_model04 <- plm(log(trades_count) ~ log(treat_ukr_inv) * trend + 
 summary(pretrend_trades_model04)
 coeftest(pretrend_trades_model04, vcov. = vcovDC(pretrend_trades_model04, type = "HC0"))
 
-pretrend_trades_model05 <- plm(log(trades_count) ~ intraday_vol_mean * trend + log(mktval) + inv_price + log(quotes_count),
+pretrend_trades_model05 <- plm(log(trades_count) ~ volatility * trend + log(mktval) + inv_price + log(quotes_count),
                                data = df_prep2, model = "within", effect = "twoways")
 summary(pretrend_trades_model05)
 coeftest(pretrend_trades_model05, vcov. = vcovDC(pretrend_trades_model05, type = "HC0"))
 
-pretrend_trades_model06 <- plm(log(trades_count) ~ intraday_5m_vol_mean * trend + log(mktval) + inv_price + log(quotes_count),
+pretrend_trades_model06 <- plm(log(trades_count) ~ log_volatility * trend + log(mktval) + inv_price + log(quotes_count),
                                data = df_prep2, model = "within", effect = "twoways")
 summary(pretrend_trades_model06)
 coeftest(pretrend_trades_model06, vcov. = vcovDC(pretrend_trades_model06, type = "HC0"))
@@ -1332,7 +1337,7 @@ panelB_R2 <- list(pretrend_trades_model01,pretrend_trades_model02,pretrend_trade
                  pretrend_trades_model04,pretrend_trades_model05,pretrend_trades_model06)
 
 treat_terms <- c("nbr_1:trend","nbr_2:trend","nbr_1_or_2:trend",
-                 "log(treat_ukr_inv):trend","intraday_vol_mean:trend","intraday_5m_vol_mean")
+                 "log(treat_ukr_inv):trend","volatility:trend","log_volatility")
 treat_labels<- c("$Neighbour_1 \\times Trend$","$Neighbour_2 \\times Trend$","$Neighbour_{1-2} \\times Trend$",
                  "$Distance \\times Trend$","$Volatility_{OC} \\times Trend$","$Volatility_{5m} \\times Trend$")
 controls <- c("log(mktval)","inv_price","log(quotes_count)")
@@ -1444,7 +1449,7 @@ library(readr)
 library(xtable)
 
 # Load dataset
-df <- read_csv("daily_balanced.csv")
+df <- read_parquet(file.path(DATA_ROOT, "daily_main.parquet"))
 
 # Keep unique firm-level entries
 df_firm <- df %>% distinct(ric, market, ctriso3, indm, .keep_all = TRUE)
