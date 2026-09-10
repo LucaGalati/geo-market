@@ -64,6 +64,9 @@ def run(sample: str, group: str):
                      "n_firms": s["ric"].nunique()})
     stats = pd.DataFrame(recs).sort_values("bin")
     stats.loc[stats["n_firms"] < MIN_FIRMS, ["mean", "ci"]] = np.nan
+    if stats["mean"].notna().sum() == 0:
+        print(f"[overnight|{sample}|{group}] no bin with at least {MIN_FIRMS} Distant firms in the window — skipped.")
+        return
 
     fig, ax = plt.subplots(figsize=(10, 4.8))
     ax.fill_between(stats["bin"], stats["mean"] - stats["ci"], stats["mean"] + stats["ci"], color="blue", alpha=0.20)
