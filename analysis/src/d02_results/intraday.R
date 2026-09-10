@@ -1,195 +1,40 @@
-################################################################################
-# --- LIBRARIES ---
-################################################################################
-library(data.table)
-library(lubridate)
-library(fixest)
-library(broom)
-library(dplyr)
-library(texreg)
+# Opening/closing-hour abnormal quoted spreads: Nearby minus Distant by relative day,
+# estimated as a regression with standard errors clustered by firm and day (the
+# figures use Welch t-tests on the same z-scores). Same design as fig_intraday_core.py.
+if (!exists("D_MAIN")) { source(file.path(dirname(sys.frame(1)$ofile), "common.R")); D_MAIN <- load_panel("main"); D_BAL <- load_panel("balanced") }
+BENCH <- c(-20, -6); PRE <- c(-5, -1); POST <- c(0, 5); DAYS <- -5:5
 
-################################################################################
-# --- LOAD DATA ---
-################################################################################
+DT <- as.data.table(read_parquet(file.path(DATA, "intraday_main.parquet"),
+                                 col_select = c("ric", "datetime", "date_local", "nbr_1_or_2", "qspread_mean")))
+A <- as.data.table(read_parquet(file.path(DATA, "psm_assignments.parquet"), col_select = c("ric", "matched_group")))
+DT <- merge(DT, A, by = "ric", all.x = TRUE)
+DT <- DT[!is.na(datetime) & !is.na(qspread_mean)]
+days <- sort(unique(DT$date_local)); DT[, day_rel := match(date_local, days) - match(as.character(EVENT), days)]
+DT[, `:=`(first_dt = min(datetime), last_dt = max(datetime)), by = .(ric, date_local)]
+DT[, `:=`(is_open = datetime < first_dt + 3600, is_close = datetime > last_dt - 3600)]
+hour_means <- function(flag) DT[get(flag) == TRUE, .(hour_mean = mean(qspread_mean * 100)), by = .(ric, date_local, day_rel, nbr_1_or_2, matched_group)]
+OPEN <- hour_means("is_open"); CLOSE <- hour_means("is_close")
 
-source("~/Desktop/geo-market/analysis/R/requirements.R")
-library(arrow)
-DATA_ROOT <- "~/Desktop/geo-market/analysis/data"
-SAMPLE    <- "main"   # "main" (unbalanced) or "balanced" (perfectly balanced)
-INTRADAY  <- file.path(DATA_ROOT, paste0("intraday_", SAMPLE, ".parquet"))
-DT <- as.data.table(read_parquet(INTRADAY,
-        col_select = c("ric", "datetime", "date_local", "nbr_1_or_2", "qspread_mean")))
-psm <- as.data.table(read_parquet(file.path(DATA_ROOT, "psm_assignments.parquet"),
-        col_select = c("ric", "matched_group", "eb_weight")))
-DT <- merge(DT, psm, by = "ric", all.x = TRUE)
-DT[, datetime := as.POSIXct(datetime, tz = "UTC")]
-DT <- DT[!is.na(datetime)]
-setorder(DT, ric, datetime)
-
-# Only valid nearby/distant
-DT[, nbr_1_or_2 := as.numeric(nbr_1_or_2)]
-DT <- DT[nbr_1_or_2 %in% c(0,1)]
-DT[, group := fifelse(nbr_1_or_2 == 1, "Nearby",
-                      fifelse(nbr_1_or_2 == 0, "Distant", NA_character_))]
-DT <- DT[!is.na(group)]
-
-DT[, date_utc := as.Date(datetime)]
-
-################################################################################
-# --- EVENT INDEX ---
-################################################################################
-
-event_day <- as.Date("2022-02-24")
-days <- sort(unique(DT$date_utc))
-day_to_idx <- setNames(seq_along(days), as.character(days))
-event_idx <- day_to_idx[as.character(event_day)]
-DT[, day_rel := day_to_idx[as.character(date_utc)] - event_idx]
-
-DAYS <- seq(-5,5,1)
-
-################################################################################
-# --- OPENING & CLOSING WINDOWS ---
-################################################################################
-
-bounds <- DT[, .(
-  first_dt = min(datetime),
-  last_dt  = max(datetime)
-), by = .(ric, date_utc)]
-
-DT <- merge(DT, bounds, by=c("ric","date_utc"))
-
-DT[, is_open_hour  := datetime >= first_dt & datetime <= first_dt + minutes(60)]
-DT[, is_close_hour := datetime >= last_dt  - minutes(60) & datetime <= last_dt]
-
-hourly_mean <- function(flag) {
-  DT[get(flag)==TRUE,
-     .(hour_mean = mean(qspread_mean * 100, na.rm=TRUE)),
-     by = .(ric, date_utc, group, day_rel)]
-}
-
-open_hr  <- hourly_mean("is_open_hour")
-close_hr <- hourly_mean("is_close_hour")
-
-################################################################################
-# --- BENCHMARKING (SAME AS PYTHON) ---
-################################################################################
-
-BENCH_WIN <- c(-20,-6)   # same as analysis/src/d01_figures/fig_intraday_core.py
-PRE_WIN   <- c(-5,-1)
-POST_WIN  <- c(0,5)
-
-compute_bench <- function(hr, win) {
-  x <- hr[day_rel %between% win]
-  gday <- x[, .(m = mean(hour_mean)), by = .(group, day_rel)]
-  g <- gday[, .(mean_bench = mean(m), std_bench = sd(m)), by = group]
-  overall <- gday[, .(mean_bench = mean(m), std_bench = sd(m))]
-  overall[, group := "Overall"]
-  rbind(g, overall)
-}
-
-bench_close <- compute_bench(close_hr, BENCH_WIN)
-bench_open  <- compute_bench(open_hr,  BENCH_WIN)
-
-standardize <- function(hr, win, bench) {
-  z <- hr[day_rel %between% win]
-  z <- merge(z, bench, by = "group", all.x = TRUE)
-  # fill missing mean/std with overall
-  for (col in c("mean_bench", "std_bench")) {
-    overall_val <- bench[group == "Overall", get(col)]
-    z[is.na(get(col)), (col) := overall_val]
+for (sample in SAMPLES) {
+  sel <- function(h) { h <- copy(h); if (sample == "matched") h <- h[matched_group %in% c(0, 1)]; h[, nearby := nbr_1_or_2]; h }
+  op <- sel(OPEN); cl <- sel(CLOSE)
+  bench <- function(h) h[day_rel >= BENCH[1] & day_rel <= BENCH[2], .(mu = mean(hour_mean), sdv = sd(hour_mean)), by = nearby]
+  z <- rbind(merge(cl[day_rel >= PRE[1] & day_rel <= PRE[2]], bench(cl), by = "nearby"),
+             merge(op[day_rel >= POST[1] & day_rel <= POST[2]], bench(op), by = "nearby"))
+  z[, z := (hour_mean - mu) / sdv]
+  # one pooled regression with day fixed effects and a Nearby coefficient per day, so that
+  # the standard errors can be clustered by firm and day (a per-day regression has one day cluster)
+  z <- z[is.finite(z)]
+  m <- feols(z ~ i(day_rel, nearby) | day_rel, z, cluster = ~ ric + date_local)
+  ct <- coeftable(m)
+  rows <- c()
+  for (dd in DAYS) {
+    s <- z[day_rel == dd]; k <- sprintf("day_rel::%d:nearby", dd)
+    rows <- c(rows, sprintf("%+d & %s & %s & %s%s & (%s) & %s \\\\", dd, fmt(mean(s[nearby == 1]$z), 2), fmt(mean(s[nearby == 0]$z), 2),
+                            fmt(ct[k, 1], 3), stars(ct[k, 4]), fmt(ct[k, 2], 3), format(nrow(s), big.mark = ",")))
   }
-  z[, z := (hour_mean - mean_bench) / std_bench]
-  z[, .(ric, group, date_utc, day_rel, z)]
+  write_tex(rows, c("Day", "Nearby", "Distant", "Difference", "SE", "Firm-days"), "intraday_difference", sample,
+            caption = "Standardized abnormal quoted spread: Nearby minus Distant by day",
+            label = paste0("tab:intraday_", sample),
+            notes = "Closing-hour means for days $-5$ to $-1$ and opening-hour means for days 0 to $+5$, standardized with the group mean and standard deviation of the firm-day hour means over days $-20$ to $-6$. Difference = coefficient of Nearby $\\times$ day in a regression of the z-scores on day fixed effects and their interactions with the Nearby indicator; standard errors clustered by firm and day.")
 }
-
-z_pre  <- standardize(close_hr, PRE_WIN,  bench_close)
-z_post <- standardize(open_hr,  POST_WIN, bench_open)
-
-z_all <- rbind(z_pre, z_post)
-
-# no winsorization of z (same as the Python figures)
-z_all <- z_all[is.finite(z)]
-
-################################################################################
-# --- DIFFERENCE TEST NEARBY − DISTANT with TWO-WAY CLUSTERED SEs ---
-################################################################################
-
-results <- list()
-
-for (d in DAYS) {
-  
-  sub <- z_all[day_rel == d]
-  # basic sanity checks
-  sub <- sub[is.finite(z)]
-  if (nrow(sub) < 10 ||
-      length(unique(sub$group)) < 2 ||
-      length(unique(sub$ric))   < 2 ||
-      length(unique(sub$date_utc)) < 1) {
-    results[[as.character(d)]] <- data.frame(
-      day_rel = d, coef = NA_real_, se = NA_real_, p = NA_real_
-    )
-    next
-  }
-  
-  sub[, nearby := as.integer(group == "Nearby")]
-  
-  # try/catch to avoid crashes from singular vcov
-  res_row <- tryCatch({
-    mod <- feols(z ~ nearby, data = sub,
-                 cluster = ~ ric + date_utc)
-    
-    vc <- vcov(mod)
-    if (any(!is.finite(vc))) {
-      data.frame(day_rel = d, coef = NA_real_, se = NA_real_, p = NA_real_)
-    } else {
-      co <- coef(mod)["nearby"]
-      se <- sqrt(vc["nearby", "nearby"])
-      p  <- 2 * pnorm(-abs(co / se))
-      data.frame(day_rel = d, coef = co, se = se, p = p)
-    }
-  }, error = function(e) {
-    data.frame(day_rel = d, coef = NA_real_, se = NA_real_, p = NA_real_)
-  })
-  
-  results[[as.character(d)]] <- res_row
-}
-
-tab <- bind_rows(results)
-
-################################################################################
-# --- LATEX TABLE ---
-################################################################################
-
-
-tab$stars <- ifelse(is.na(tab$p), "",
-                    ifelse(tab$p < 0.01, "***",
-                           ifelse(tab$p < 0.05, "**",
-                                  ifelse(tab$p < 0.10, "*", ""))))
-
-tab$coef_se <- ifelse(
-  is.na(tab$coef),
-  "NA",
-  sprintf("%.4f%s (%.4f)", tab$coef, tab$stars, tab$se)
-)
-
-latex_tab <- tab %>%
-  dplyr::select(day_rel, coef_se)
-
-print(latex_tab)
-
-# Write LaTeX table
-sink("difference_nearby_distant_table.tex")
-cat("\\begin{table}[ht]\n\\centering\n")
-cat("\\caption{Difference Between Nearby and Distant Firms (Two-way Clustered SEs)}\n")
-cat("\\begin{tabular}{cc}\n\\hline\n")
-cat("Day Relative & Coefficient (SE) \\\\\n\\hline\n")
-for (i in seq_len(nrow(latex_tab))) {
-  cat(latex_tab$day_rel[i], " & ", latex_tab$coef_se[i], " \\\\\n")
-}
-cat("\\hline\n\\end{tabular}\n\\end{table}\n")
-sink()
-
-cat("✅ LaTeX table written to difference_nearby_distant_table.tex\n")
-
-
-

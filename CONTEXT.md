@@ -39,3 +39,12 @@ Event study of the liquidity of stocks around the Russian invasion of Ukraine (2
 - **Entropy-balanced group** — Nearby = all treated firms (weight 1) vs Distant = all control firms weighted by `eb_weight`; a robustness alternative to the matched pairs.
 - **Overnight window** — the fixed interval 23:00 UTC on 23 February to 07:00 UTC on 24 February 2022 over which the overnight figure is drawn for every sample; only Distant firms trade in it.
 - **Sample-selection log** — `analysis/output/sampling/sampling_log.csv`, one row per selection step written by each pipeline stage; the source of the sample table and of the data-section numbers.
+
+## Regressions (September 2026)
+- **War** — the post-invasion indicator: 1 on and after 24 February 2022 (`post`). The difference-in-differences coefficient is the treatment × War interaction with firm and day fixed effects and standard errors clustered by firm and day.
+- **Negative distance** — minus the great-circle distance of the headquarters from Ukraine in thousands of km (`negdist`); the linear continuous treatment, so that a positive coefficient means a larger effect for closer firms.
+- **Dose** — proximity to Ukraine, 3,000 km minus the distance (in thousands of km), for the dose-response analysis; firms beyond 3,000 km are the untreated reference. **ATT(d)**: effect for the firms of a distance bin; **ACRT(d)**: change of the effect per 1,000 km of proximity between adjacent bins.
+- **War-day return** — the firm's log return on 24 February 2022 (`ret_war`); the economic treatment.
+- **Pre-war volatility** — the firm's average volatility before the invasion, standardized across the firms of the sample (`prevol_z`).
+- **Intensity** — Neighbor₁,₂ × negative distance: the neighbour effect scaled by proximity.
+- **Decomposition** — effective half-spread = realized half-spread + price impact; used to attribute the spread response to adverse selection (price impact) or to liquidity providers' revenues (realized spread).

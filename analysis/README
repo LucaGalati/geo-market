@@ -1,24 +1,33 @@
-Run main.py to replicate all the results together (panels -> matching -> figures -> R tables).
+Analysis stage: panels -> matching -> figures -> tables/text -> R regressions.
+Run with `python run.py --stage analysis` (or `python analysis/main.py`) from anywhere; every
+script can also be run on its own from the repository root. Inputs: preprocessing/data/03_output.
 
-Inputs: preprocessing/data/03_output/*.parquet (produced by preprocessing/master.py).
-Glossary of samples, groups and measures: ../CONTEXT.md. Design decisions: ../docs/adr/.
+  python analysis/src/d00_preprocessing/gathering.py   -> data/{daily,intraday}_{main,balanced}.parquet
+      main = firms with >= 1 trading day before and after 24 Feb 2022 (all their days kept);
+      balanced = firms on every trading day of the union calendar (robustness). Rows need quoted and
+      effective spread, trades, dollar volume, market value, price impact and realized spread.
+  python analysis/src/d00_preprocessing/matching.py    -> data/psm_assignments.parquet (matched_group, eb_weight), data/psm_balance.csv
+      one matching on pre-period firm medians of log market value, log dollar volume (USD) and log
+      quoted spread: Mahalanobis distance within an adaptive propensity caliper, 1:1 without
+      replacement (optimal assignment); entropy-balancing weights as robustness.
+  python analysis/src/d01_figures/daily.py             -> output/figures/daily/{main,balanced}/{full,matched,eb}/
+  python analysis/src/d01_figures/intraday.py          -> output/figures|tables/intraday/... (open/close-hour z-scores, Welch t-tests)
+  python analysis/src/d01_figures/intraday_overnight.py-> output/figures|tables/overnight/...
+  python analysis/src/d01_figures/descriptives.py      -> output/figures|tables/map/... (+ firms_by_country.tex, longtable)
+  python analysis/src/d03_docs/build_sampling_docs.py  -> output/tables/{sample_selection,currencies,matching/balance}.tex,
+                                                          ../docs/paper/sampling/{data_section,formulas_appendix}.tex (from the templates)
+  Rscript analysis/src/d02_results/run_all.R           -> output/tables/regressions/{matched,main}/ (paper) and internal/{balanced,eb}/
+      common.R        root, panels, units (spreads/impact/realized in %, activity in logs of USD, volatility in %),
+                      samples, did() = feols with firm + day fixed effects and SEs clustered by firm and day
+      descriptives.R  summary statistics, Nearby vs Distant means with clustered differences and DiD, firms by industry
+      pretrends.R     treatment x trend on the pre-period, also by distance bin
+      baseline.R      neighbour dummies, negative distance (linear TWFE), war-day return, intensity, volatility as outcome
+      dose_response.R ATT by distance bin vs firms beyond 3,000 km, ACRT per 1,000 km and dose-weighted
+                      average (Callaway, Goodman-Bacon and Sant'Anna 2025), figure, contdid B-spline estimates
+      horserace.R     geographic treatment together with the war-day return and pre-war volatility
+      mechanism.R     effective = realized spread + price impact; mediation with Gelbach share; pre-war price impact terciles
+      intraday.R      Nearby - Distant abnormal opening/closing-hour spreads by day, clustered regression
+  Figures carry no titles (the folder says sample and group). Long tables use longtable.
 
-To replicate step by step:
-  python src/d00_preprocessing/gathering.py   -> data/{daily,intraday}_{main,balanced}.parquet
-  python src/d00_preprocessing/matching.py    -> data/psm_assignments.parquet (matched_group, eb_weight), data/psm_balance.csv
-  python src/d01_figures/daily.py             -> output/figures/daily/{main,balanced}/{full,matched,eb}/
-  python src/d01_figures/intraday.py          -> output/figures|tables/intraday/{main,balanced}/{full,matched,eb}/
-  python src/d01_figures/intraday_overnight.py-> output/figures|tables/overnight/...
-  python src/d01_figures/descriptives.py      -> output/figures|tables/map/{main,balanced}/{full,matched}/ (+ firms_by_country.tex)
-  python src/d03_docs/build_sampling_docs.py  -> output/tables/{sample_selection,currencies,matching/balance}.tex (longtable for the long ones),
-                                                 ../docs/paper/sampling/{data_section,formulas_appendix}.tex, ../docs/paper/notes/filtering.md
-  (figures carry no titles: the folder says sample and group; copy figures/tables into docs/paper by hand
-   when compiling the manuscript; output/sampling/sampling_log.csv is the selection funnel)
-  Rscript src/d02_results/daily.R             (set SAMPLE <- "main" or "balanced" at the top)
-  Rscript src/d02_results/intraday.R
-  Rscript src/d02_results/descriptives.R
-
-R: system R >= 4.4; run `Rscript R/requirements.R` once to install the packages (arrow, data.table, fixest, plm, ...).
-Python: conda env from ../environment.yml.
-
-Tested on Sep 3, 2026 - MacBook Pro M4 Max, 32GB, macOS 26.1, R 4.5.3, Python 3.10.
+R: system R >= 4.4; `Rscript analysis/R/requirements.R` installs arrow, data.table, fixest, contdid, ggplot2.
+Python: conda env from ../environment.yml. Sample-selection funnel: output/sampling/sampling_log.csv.

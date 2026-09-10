@@ -1,17 +1,10 @@
-print('###################################################')
-print('Gather equity data from Datastream...')
-print('###################################################\n')
-import src.d00_gathering.sample
+"""Preprocessing stage only (Datastream sample, ECB rates, panels). Same flags as run.py;
+the TRTH tick processing is included with --with-trth."""
+import sys
+from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from run import main  # noqa: E402
 
-print('###################################################')
-print('Prepare data from LSEG Tick History...')
-print('###################################################\n')
-import src.d01_preprocessing.trth_summary
-import src.d01_preprocessing.trth
-
-
-print('###################################################')
-print('Prepare merge for panel data...')
-print('###################################################\n')
-import src.d02_panels.merge
+if __name__ == "__main__":
+    main(["--stage", "preprocessing", *sys.argv[1:]])

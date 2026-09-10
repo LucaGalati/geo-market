@@ -1,30 +1,43 @@
-Run master.py to gather and prepare the data (Datastream sample -> TRTH 5-minute metrics -> merged panels).
-All outputs are Parquet; the analysis stage (../analysis) reads data/03_output/*.parquet.
+Preprocessing stage: Datastream sample -> TRTH five-minute measures -> ECB rates -> merged panels.
+Run with `python run.py --stage preprocessing` (or `python preprocessing/master.py`) from anywhere;
+add `--with-trth` for the tick processing. Every script can also be run on its own from the
+repository root.
 
-Step by step:
-  python src/d00_gathering/sample.py                  -> data/02_preprocessed/sample.csv (Datastream, USD)
-  python src/d01_preprocessing/trth.py [options]      -> data/02_preprocessed/trth/ukraine*.parquet
-  python src/d00_gathering/fx_rates.py   -> data/01_raw/handcoded/{fx_rates_ecb,venue_currency}.csv (ECB reference rates,
-                                            currency and unit factor of each venue; run once before merge.py)
-  python src/d02_panels/merge.py   (dollar volume and depth value converted to USD with the ECB rate of the venue's currency;
-                                   excluded listings and implied-rate venues in analysis/output/tables/fx_diagnostics.csv)                      -> data/03_output/{intraday,daily,...}.parquet
+  python preprocessing/src/d00_gathering/sample.py            -> data/02_preprocessed/sample.csv
+      Datastream equities: USD prices and market values, GeoNames coordinates, distances to Ukraine,
+      neighbour dummies (nbr_1, nbr_1_or_2), market value >= $10m; returns from priced rows only.
+  python preprocessing/src/d01_preprocessing/trth_summary.py  -> data/02_preprocessed/trth/summary/trth_summary.csv
+      row/quote/trade counts of the raw .gz files (diagnostic; the numbers are hard-coded in the docs builder).
+  python preprocessing/src/d01_preprocessing/trth.py --phase2-workers 8 --output-format parquet --timings
+      -> data/02_preprocessed/trth/ukraineNN.parquet. Two phases: (1) stream each .gz into shards per
+      RIC x local trading day under data/02_preprocessed/tmp/ (reused if present); (2) per shard:
+      cleaning (crossed quotes, negative prices/volumes, stub quotes with spread/mid > 25%, trades
+      more than 50% from the prevailing mid; London prints in pounds rescaled to pence), prevailing
+      mid within the local day, Lee-Ready direction (quote rule + tick rule) and the Jurkatis (2022)
+      full-information direction (vendored in tradeclass/, MIT; build once with
+      `python setup.py build_ext --inplace` inside that folder), quoted/effective spread, same-day
+      five-minute price impact for both directions, depth, dollar volume, trade-to-trade returns,
+      volatility of five-minute midpoint returns, aggregation to five-minute buckets (price_close =
+      last trade of the bucket).
+        --direction tick|fi|both   trade direction(s) (default both)
+        --winsor-ticks             tick-level winsorization at 0.01%/99.99% per RIC (default off)
+        --engine polars --temp-format parquet   polars engine (parity-tested against pandas)
+        --auto-tune, --chunksize, --phase2-workers, --generate-sample (synthetic test file)
+  python preprocessing/src/d01_preprocessing/count_tick_filters.py
+      exact counts of the tick filters over the shards (~1.5 h) -> trth/summary/tick_filter_counts.csv
+  python preprocessing/src/d01_preprocessing/validate_fi.py
+      FI vs Lee-Ready agreement on random real shards -> trth/summary/fi_validation.csv
+  python preprocessing/src/d00_gathering/fx_rates.py          -> data/01_raw/handcoded/{fx_rates_ecb,venue_currency}.csv
+      daily ECB reference rates in local units per USD (public ECB zip) and the currency, unit factor
+      (pence, cents, agorot) and rate source of every venue (country from markets.csv).
+  python preprocessing/src/d02_panels/merge.py                -> data/03_output/{intraday,daily}{,_RUS_UKR,_AERO_DEF}.parquet
+      per-file merge with the Datastream sample on (RIC, local trading day); local trading hours,
+      weekends and exchange holidays; penny screen (Datastream price <= $1 or local price <= 1);
+      dollar volume and depth value converted to USD with the ECB rate of the venue's currency
+      (implied exchange-day rate for currencies the ECB does not quote); listings quoted in another
+      currency than their exchange excluded; realized spread = effective spread - price impact;
+      daily aggregation with polars; sample-selection log rows.
 
-TRTH preprocessing (two phases: stage shards per ric x LOCAL trading day, then compute 5-minute metrics):
-  python src/d01_preprocessing/trth.py --phase2-workers 8 --output-format parquet --timings
-  Phase 1 shards in data/02_preprocessed/tmp are reused when present (a completed staging carries a
-  _PHASE1_COMPLETE marker); delete a staging folder to re-stage from the raw .csv.gz.
-  --engine polars --temp-format parquet  : polars engine (parity-tested against pandas)
-  --direction tick|fi|both               : trade direction (default both): Lee-Ready (quote rule + tick rule) and the
-                                           Jurkatis (2022, JFM) full-information algorithm (vendored in
-                                           src/d01_preprocessing/tradeclass/, MIT; build once with
-                                           `python setup.py build_ext --inplace` inside that folder)
-  --winsor-ticks                         : tick-level winsorization per ric at 0.01%/99.99% (default OFF)
-  src/d01_preprocessing/validate_fi.py   : FI vs tick-test validation on random real shards
-  src/d01_preprocessing/count_tick_filters.py : exact counts of crossed/stub quotes and bad prints per file
-  --auto-tune                            : chunk size / workers from RAM and CPU
-  --generate-sample                      : small synthetic .csv.gz for testing
-
-Cleaning applied at the tick level: ask < bid quotes, negative prices/volumes, stub quotes
-((ask-bid)/mid > 25%) and trades more than 50% away from the prevailing midpoint are dropped.
-
-Tested on Sep 3, 2026 - MacBook Pro M4 Max, 32GB, macOS 26.1.
+Data folders (not in git): data/01_raw (Datastream csv, TRTH .gz, hand-coded markets.csv),
+data/02_preprocessed (sample.csv, TRTH shards and outputs), data/03_output (panels). GEO_DATA_ROOT
+overrides the data root for trth.py and merge.py (tests on synthetic data).
