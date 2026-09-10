@@ -29,5 +29,5 @@ script can also be run on its own from the repository root. Inputs: preprocessin
       intraday.R      Nearby - Distant abnormal opening/closing-hour spreads by day, clustered regression
   Figures carry no titles (the folder says sample and group). Long tables use longtable.
 
-R: system R >= 4.4; `Rscript analysis/R/requirements.R` installs arrow, data.table, fixest, contdid, ggplot2.
+R: system R >= 4.4; `Rscript analysis/R/requirements.R` installs arrow, data.table, fixest (>= 0.14), contdid, ggplot2.
 Python: conda env from ../environment.yml. Sample-selection funnel: output/sampling/sampling_log.csv.

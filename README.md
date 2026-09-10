@@ -24,7 +24,7 @@ and notes) is not part of the repository.
 
 ```bash
 conda env create -f environment.yml && conda activate geo-market   # Python 3.10 + pandas/polars/pyarrow
-Rscript analysis/R/requirements.R                                  # R >= 4.4: arrow, data.table, fixest, contdid, ggplot2
+Rscript analysis/R/requirements.R                                  # R >= 4.4: arrow, data.table, fixest >= 0.14, contdid, ggplot2
 python run.py                                                      # everything except the tick processing
 ```
 
