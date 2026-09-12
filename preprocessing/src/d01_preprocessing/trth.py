@@ -51,6 +51,7 @@ np.seterr(invalid="ignore")
 
 # ---------- DEFAULTS ----------
 CHUNKSIZE = 3_000_000   # tune up/down; this is RAM-safe on 32 GB
+PHASE1_CHUNK_BYTES = int(os.environ.get("PHASE1_CHUNK_BYTES", 512 * 1024**2))   # text parsed per polars Phase 1 chunk (~5M ticks, ~3 GB peak)
 DEFAULT_OUTPUT_FORMAT = "parquet"
 DEFAULT_PARQUET_COMPRESSION = "snappy"
 DEFAULT_PARQUET_MAX_ROWS = 1_000_000
@@ -301,36 +302,24 @@ def _write_parquet_dataset(
     max_rows_per_file: int | None,
     basename_template: str,
 ):
+    """Hive-partitioned parquet parts named by `basename_template`: the names carry the
+    chunk index, and Phase 2 reads the parts of a shard back in that order."""
     _require_pyarrow()
     table = _to_arrow_table(df)
-    # Prefer dataset writer when available; fallback to parquet.write_to_dataset.
-    try:
-        file_format = ds.ParquetFileFormat()
-        try:
-            file_options = file_format.make_write_options(compression=compression or "snappy")
-        except Exception:
-            file_options = None
-        try:
-            partitioning = ds.partitioning(partition_cols, flavor="hive")
-        except Exception:
-            partitioning = partition_cols
-        ds.write_dataset(
-            table,
-            base_dir=str(out_root),
-            format=file_format,
-            partitioning=partitioning,
-            existing_data_behavior="overwrite_or_ignore",
-            basename_template=basename_template,
-            max_rows_per_file=max_rows_per_file or None,
-            file_options=file_options,
-        )
-    except Exception:
-        pq.write_to_dataset(
-            table,
-            root_path=str(out_root),
-            partition_cols=partition_cols,
-            compression=compression or "snappy",
-        )
+    partitioning = ds.partitioning(pa.schema([table.schema.field(c) for c in partition_cols]), flavor="hive")
+    kwargs = {}
+    if max_rows_per_file:
+        kwargs = {"max_rows_per_file": max_rows_per_file, "max_rows_per_group": min(max_rows_per_file, 1 << 20)}
+    ds.write_dataset(
+        table,
+        base_dir=str(out_root),
+        format=ds.ParquetFileFormat(),
+        partitioning=partitioning,
+        existing_data_behavior="overwrite_or_ignore",
+        basename_template=basename_template,
+        file_options=ds.ParquetFileFormat().make_write_options(compression=compression or "snappy"),
+        **kwargs,
+    )
 
 def _read_parquet_shard(shard_dir: Path) -> pd.DataFrame:
     _require_pyarrow()
@@ -556,7 +545,7 @@ def stage_phase_one(
                     partition_cols=parquet_partition_cols,
                     compression=parquet_compression,
                     max_rows_per_file=parquet_max_rows,
-                    basename_template=f"part-{chunk_idx}-{{i}}.parquet",
+                    basename_template=f"part-{chunk_idx:05d}-{{i}}.parquet",
                 )
         else:
             # write grouped shards as CSV.GZ
@@ -606,11 +595,16 @@ def stage_phase_one_polars(
     }
     usecols = [c for c in rename_map.keys() if c != "Domain"]
 
-    with timed(f"Phase 1 polars load ({gz_path.name})", timings):
-        lf = _polars_scan_csv(str(gz_path), usecols)
+    keep = [
+        "ric", "datetime", "gmt", "type", "is_quote", "is_trade",
+        "price", "volume", "bid", "ask", "bid_size", "ask_size", "date_local", "day", "seq"
+    ]
 
-        lf = lf.rename({k: v for k, v in rename_map.items() if v})
-
+    def transform(df: "pl.DataFrame", chunk_idx: int) -> "pl.DataFrame":
+        df = df.rename({k: v for k, v in rename_map.items() if v and k in df.columns})
+        # position of the tick in the raw file: the parquet writer may store the batches of a
+        # shard out of order, so Phase 2 sorts on (datetime, seq) to recover the exchange sequence
+        df = df.with_columns((pl.int_range(pl.len(), dtype=pl.Int64) + chunk_idx * 10**10).alias("seq"))
         gmt_str = pl.col("gmt").cast(pl.Utf8, strict=False).str.strip_chars()
         sign = pl.when(gmt_str.str.starts_with("-")).then(-1).otherwise(1)
         gmt_clean = pl.when(gmt_str.str.starts_with("+") | gmt_str.str.starts_with("-")) \
@@ -618,49 +612,70 @@ def stage_phase_one_polars(
         gmt_hours = pl.when(gmt_str.is_null() | (gmt_str == "")) \
             .then(None) \
             .otherwise(gmt_clean.cast(pl.Float64, strict=False) * sign)
-
         local_offset_seconds = (gmt_hours * 3600.0).round(0).cast(pl.Int64, strict=False)
-
-        lf = lf.with_columns(
+        df = df.with_columns(
             pl.col("datetime").str.strptime(
                 pl.Datetime("ns"), format="%Y-%m-%dT%H:%M:%S%.fZ", strict=False
             ).alias("datetime"),
             pl.col("price").cast(pl.Float64, strict=False),
             pl.col("bid").cast(pl.Float64, strict=False),
             pl.col("ask").cast(pl.Float64, strict=False),
-            pl.col("volume").cast(pl.Int64, strict=False),
-            pl.col("bid_size").cast(pl.Int64, strict=False),
-            pl.col("ask_size").cast(pl.Int64, strict=False),
+            pl.col("volume").cast(pl.Float64, strict=False).cast(pl.Int64, strict=False),
+            pl.col("bid_size").cast(pl.Float64, strict=False).cast(pl.Int64, strict=False),
+            pl.col("ask_size").cast(pl.Float64, strict=False).cast(pl.Int64, strict=False),
             (pl.col("type").cast(pl.Utf8, strict=False).str.to_uppercase() == "QUOTE").alias("is_quote"),
             (pl.col("type").cast(pl.Utf8, strict=False).str.to_uppercase() == "TRADE").alias("is_trade"),
         )
-
-        lf = lf.with_columns(
-            (pl.col("datetime") + pl.duration(seconds=local_offset_seconds)).alias("local_dt")
+        df = df.with_columns(
+            (pl.col("datetime") + pl.duration(seconds=local_offset_seconds, time_unit="ns")).alias("local_dt")
         )
-        lf = lf.with_columns(
+        df = df.with_columns(
             pl.col("local_dt").dt.date().cast(pl.Utf8).alias("date_local"),
-            # partition key = LOCAL day (also fixes the "day" column missing in this engine)
+            # partition key = LOCAL day, so a session straddling UTC midnight stays in one shard
             pl.col("local_dt").dt.date().cast(pl.Utf8).alias("day"),
         )
+        return df.select(keep)
 
-        keep = [
-            "ric", "datetime", "gmt", "type", "is_quote", "is_trade",
-            "price", "volume", "bid", "ask", "bid_size", "ask_size", "date_local", "day"
-        ]
-        lf = lf.select(keep)
-
-        df = lf.collect(streaming=True)
-
-    with timed(f"Phase 1 polars parquet write ({gz_path.name})", timings):
-        _write_parquet_dataset(
-            df,
-            out_root=out_root,
-            partition_cols=parquet_partition_cols,
-            compression=parquet_compression,
-            max_rows_per_file=parquet_max_rows,
-            basename_template="part-{i}.parquet",
-        )
+    # the raw files are up to ~17 GB gzipped (>100 GB of text): decompress in a stream and
+    # parse PHASE1_CHUNK_BYTES of text at a time; the parts of one chunk carry its zero-padded
+    # index so that Phase 2 reads them back in file order (ties in the time stamps keep the
+    # exchange's sequence)
+    n_rows = 0
+    with timed(f"Phase 1 polars stream ({gz_path.name})", timings):
+        with gzip.open(gz_path, "rb") as fh:
+            header = fh.readline()
+            rest = b""
+            chunk_idx = 0
+            while True:
+                buf = fh.read(PHASE1_CHUNK_BYTES)
+                if not buf and not rest:
+                    break
+                buf = rest + buf
+                cut = buf.rfind(b"\n")
+                if not fh.peek(1):            # end of file: take everything
+                    chunk, rest = buf, b""
+                elif cut < 0:
+                    rest = buf
+                    continue
+                else:
+                    chunk, rest = buf[:cut + 1], buf[cut + 1:]
+                if not chunk.strip():
+                    continue
+                df = pl.read_csv(io.BytesIO(header + chunk), columns=usecols, infer_schema=False,
+                                 ignore_errors=True)
+                df = transform(df, chunk_idx)
+                n_rows += df.height
+                _write_parquet_dataset(
+                    df,
+                    out_root=out_root,
+                    partition_cols=parquet_partition_cols,
+                    compression=parquet_compression,
+                    max_rows_per_file=parquet_max_rows,
+                    basename_template=f"part-{chunk_idx:05d}-{{i}}.parquet",
+                )
+                del df
+                chunk_idx += 1
+        log(f"Phase 1 polars: {n_rows:,} rows in {chunk_idx} chunks -> {out_root}")
 
     (out_root / "_PHASE1_COMPLETE").touch()
     return out_root
@@ -724,7 +739,8 @@ def process_shard_folder(shard_dir: Path, tmp_format: str, direction: str = DIRE
 
     # sort (stable); the masks above follow the new row order, otherwise the boolean
     # arithmetic below would align them by label and scramble the depth of unsorted shards
-    df = df.sort_values(["ric","date_local","datetime"], kind="mergesort")
+    order = ["ric", "date_local", "datetime"] + (["seq"] if "seq" in df.columns else [])
+    df = df.sort_values(order, kind="mergesort")
     valid_sizes = valid_sizes.loc[df.index]
     valid_prices = valid_prices.loc[df.index]
 
@@ -998,7 +1014,8 @@ def process_shard_folder_polars(shard_dir: Path, tmp_format: str, direction: str
 
 
     # stable sort: ticks with the same time stamp keep their file order, as in the pandas engine (mergesort)
-    df = df.sort(["ric", "date_local", "datetime"], maintain_order=True)
+    order = ["ric", "date_local", "datetime"] + (["seq"] if "seq" in df.columns else [])
+    df = df.sort(order, maintain_order=True)
 
     df = df.with_columns(
         pl.col("mid_quote").forward_fill().over(["ric", "date_local"]).alias("mid_ref"),

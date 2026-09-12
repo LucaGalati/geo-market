@@ -10,9 +10,12 @@ repository root.
       row/quote/trade counts of the raw .gz files (diagnostic; the numbers are hard-coded in the docs builder).
   python preprocessing/src/d01_preprocessing/trth.py --timings
       -> data/02_preprocessed/trth/ukraineNN.parquet (polars engine, parquet output, cores - 2 Phase 2
-      workers by default). Two phases: (1) stream each .gz into shards per RIC x local trading day
-      under data/02_preprocessed/tmp/ukraineNN/ (parquet shards; reused in whatever format they have
-      if the folder exists, so a rerun after a change in the measures redoes only Phase 2); (2) per
+      workers by default). Two phases: (1) stream each .gz (up to 17 GB gzipped) in 512 MB chunks of
+      text into parquet shards per RIC x local trading day under data/02_preprocessed/tmp/ukraineNN/
+      (each tick keeps its position in the raw file, `seq`, so ties in the time stamps keep the
+      exchange's sequence; a folder with the _PHASE1_COMPLETE marker is reused in whatever format it
+      has, so a rerun after a change in the measures redoes only Phase 2; folders without the
+      marker are refused unless --reuse-unmarked-shards); (2) per
       shard: cleaning (crossed quotes, negative prices/volumes, stub quotes with spread/mid > 25%,
       trades more than 50% from the prevailing mid; London prints in pounds rescaled to pence),
       prevailing mid within the local day, Lee-Ready direction (quote rule + tick rule) and the
