@@ -51,8 +51,7 @@ np.seterr(invalid="ignore")
 
 # ---------- DEFAULTS ----------
 CHUNKSIZE = 3_000_000   # tune up/down; this is RAM-safe on 32 GB
-DEFAULT_TEMP_FORMAT = "csv"
-DEFAULT_OUTPUT_FORMAT = "csv"
+DEFAULT_OUTPUT_FORMAT = "parquet"
 DEFAULT_PARQUET_COMPRESSION = "snappy"
 DEFAULT_PARQUET_MAX_ROWS = 1_000_000
 # tick-level winsorization (per ric within a shard) is OFF by default: the
@@ -77,6 +76,7 @@ MAX_TRADE_DEV = 0.50    # trade more than 50% away from the prevailing mid = bad
 # prints are dropped as bad prints.
 MINOR_UNIT_RATIO = 0.01
 MINOR_UNIT_TOL = 0.05
+MINOR_UNIT_FACTOR = 100   # exact integer rescaling (dividing by 0.01 is one ulp off and flips at-mid signs)
 
 # ---------- FOLDER STRUCTURE ----------
 DATA_ROOT = Path(os.environ.get("GEO_DATA_ROOT", Path(__file__).resolve().parents[2] / "data"))
@@ -437,6 +437,33 @@ def fi_direction(df: pd.DataFrame, freq: int = FI_FREQ, bar: float = FI_BAR):
 
 
 # ---------- PHASE 1 : stream & shard (CSV.GZ or Parquet) ----------
+REUSE_UNMARKED_SHARDS = False   # --reuse-unmarked-shards
+
+
+def _check_staged(out_root: Path, base: str) -> None:
+    """Staged shards are reused only with their completion marker: unmarked folders come from
+    an interrupted run or from the pre-September 2026 staging by UTC day, which split the
+    Asia-Pacific sessions at UTC midnight."""
+    if (out_root / "_PHASE1_COMPLETE").exists():
+        print(f"   ↪ Phase 1 already completed for {base} — reusing staged shards.")
+    elif REUSE_UNMARKED_SHARDS:
+        print(f"   ⚠️ Reusing staged shards for {base} without a completion marker.")
+    else:
+        raise RuntimeError(f"staged shards for {base} in {out_root} have no _PHASE1_COMPLETE marker "
+                           "(interrupted run, or staged by UTC day before September 2026): move or delete "
+                           "the folder to restage from raw, or pass --reuse-unmarked-shards.")
+
+
+def staged_format(out_root: Path, engine: str) -> str:
+    """Format of the shards under tmp/<base>: the existing one, else the engine's own."""
+    if out_root.exists():
+        if any(out_root.rglob("*.csv.gz")):
+            return "csv"
+        if any(out_root.rglob("*.parquet")):
+            return "parquet"
+    return "parquet" if engine == "polars" else "csv"
+
+
 def stage_phase_one(
     gz_path: Path,
     tmp_root: Path,
@@ -462,11 +489,7 @@ def stage_phase_one(
     else:
         existing_files = list(out_root.rglob("*.csv.gz")) if out_root.exists() else []
     if existing_files:
-        if (out_root / "_PHASE1_COMPLETE").exists():
-            print(f"   ↪ Phase 1 already completed for {base} — reusing staged shards.")
-        else:
-            print(f"   ⚠️ Reusing staged shards for {base} without a completion marker "
-                  f"(staged by an older run, or interrupted). Delete {out_root} to restage from raw.")
+        _check_staged(out_root, base)
         return out_root  # reuse existing shards
 
     # if folder exists but empty, continue (do not delete)
@@ -561,19 +584,13 @@ def stage_phase_one_polars(
     normalize columns, compute flags/date, and write partitioned Parquet shards.
     """
     _require_polars()
-    if tmp_format != "parquet":
-        raise ValueError("Polars engine requires --temp-format parquet.")
 
     base = gz_path.stem.replace(".csv", "")
     out_root = tmp_root / base
 
     existing_files = list(out_root.rglob("*.parquet")) if out_root.exists() else []
     if existing_files:
-        if (out_root / "_PHASE1_COMPLETE").exists():
-            print(f"   ↪ Phase 1 already completed for {base} — reusing staged shards.")
-        else:
-            print(f"   ⚠️ Reusing staged shards for {base} without a completion marker "
-                  f"(staged by an older run, or interrupted). Delete {out_root} to restage from raw.")
+        _check_staged(out_root, base)
         return out_root
 
     if not out_root.exists():
@@ -606,7 +623,7 @@ def stage_phase_one_polars(
 
         lf = lf.with_columns(
             pl.col("datetime").str.strptime(
-                pl.Datetime, format="%Y-%m-%dT%H:%M:%S.%fZ", strict=False
+                pl.Datetime("ns"), format="%Y-%m-%dT%H:%M:%S%.fZ", strict=False
             ).alias("datetime"),
             pl.col("price").cast(pl.Float64, strict=False),
             pl.col("bid").cast(pl.Float64, strict=False),
@@ -705,8 +722,11 @@ def process_shard_folder(shard_dir: Path, tmp_format: str, direction: str = DIRE
     valid_sizes  = df["ask_size"].notna() & df["bid_size"].notna() & (df["ask_size"] > 0) & (df["bid_size"] > 0)
     valid_prices = df["ask"].notna() & df["bid"].notna()
 
-    # sort
+    # sort (stable); the masks above follow the new row order, otherwise the boolean
+    # arithmetic below would align them by label and scramble the depth of unsorted shards
     df = df.sort_values(["ric","date_local","datetime"], kind="mergesort")
+    valid_sizes = valid_sizes.loc[df.index]
+    valid_prices = valid_prices.loc[df.index]
 
     # reference mids
     df["mid_ref"]   = df.groupby(["ric","date_local"], group_keys=False)["mid_quote"].ffill()
@@ -720,7 +740,7 @@ def process_shard_folder(shard_dir: Path, tmp_format: str, direction: str = DIRE
         & ((ratio / MINOR_UNIT_RATIO - 1).abs() <= MINOR_UNIT_TOL)
     )
     if minor_unit.any():
-        df.loc[minor_unit, "price"] = df.loc[minor_unit, "price"] / MINOR_UNIT_RATIO
+        df.loc[minor_unit, "price"] = df.loc[minor_unit, "price"] * MINOR_UNIT_FACTOR
     # trades printing far from the prevailing mid are bad prints, not information
     off_trade = (
         df["is_trade"] & df["price"].notna() & df["prev_mid_ref"].notna()
@@ -902,21 +922,26 @@ def process_shard_folder_polars(shard_dir: Path, tmp_format: str, direction: str
                 key, val = part.split("=", 1)
                 if key not in df.columns:
                     df = df.with_columns(pl.lit(val).alias(key))
-        dt_expr = pl.col("datetime").cast(pl.Datetime, strict=False)
+        dt_expr = pl.col("datetime").cast(pl.Datetime("ns"), strict=False)
     elif tmp_format == "csv":
         files = sorted(shard_dir.glob("*.csv.gz"))
         if not files:
             return pl.DataFrame()
+        # explicit numeric types: on quote-heavy shards the first rows carry no trade,
+        # inference would type price/volume as strings and the later cast would null them
+        num = {c: pl.Float64 for c in ("price", "volume", "bid", "ask", "bid_size", "ask_size")}
         try:
             df = pl.concat(
-                [pl.read_csv(str(f), infer_schema_length=1000) for f in files],
+                [pl.read_csv(str(f), infer_schema_length=1000, schema_overrides=num) for f in files],
                 how="vertical_relaxed",
                 rechunk=True,
             )
         except Exception:
             return pl.DataFrame()
+        # nanosecond precision as in the raw data: the FI classifier aggregates the
+        # updates of a time stamp, so a microsecond truncation would merge distinct updates
         dt_expr = pl.col("datetime").cast(pl.Utf8, strict=False).str.strptime(
-            pl.Datetime, format="%Y-%m-%d %H:%M:%S%.f%z", strict=False
+            pl.Datetime("ns"), format="%Y-%m-%d %H:%M:%S%.f%z", strict=False
         )
     else:
         raise ValueError(f"Unsupported temp format for polars: {tmp_format}")
@@ -944,14 +969,14 @@ def process_shard_folder_polars(shard_dir: Path, tmp_format: str, direction: str
         (pl.col("is_trade") == True)
         & ((pl.col("price") < 0) | (pl.col("volume") < 0))
     )
-    df = df.filter(~bad_quote & ~bad_trade)
+    df = df.filter(~bad_quote.fill_null(False) & ~bad_trade.fill_null(False))
     stub_quote = (
         (pl.col("is_quote") == True)
         & pl.col("ask").is_not_null()
         & pl.col("bid").is_not_null()
         & ((pl.col("ask") - pl.col("bid")) / ((pl.col("ask") + pl.col("bid")) / 2) > MAX_REL_SPREAD)
     )
-    df = df.filter(~stub_quote)
+    df = df.filter(~stub_quote.fill_null(False))
 
     valid_sizes = (
         pl.col("ask_size").is_not_null()
@@ -972,7 +997,8 @@ def process_shard_folder_polars(shard_dir: Path, tmp_format: str, direction: str
     )
 
 
-    df = df.sort(["ric", "date_local", "datetime"])
+    # stable sort: ticks with the same time stamp keep their file order, as in the pandas engine (mergesort)
+    df = df.sort(["ric", "date_local", "datetime"], maintain_order=True)
 
     df = df.with_columns(
         pl.col("mid_quote").forward_fill().over(["ric", "date_local"]).alias("mid_ref"),
@@ -985,7 +1011,7 @@ def process_shard_folder_polars(shard_dir: Path, tmp_format: str, direction: str
         & ((pl.col("price") / pl.col("prev_mid_ref") / MINOR_UNIT_RATIO - 1).abs() <= MINOR_UNIT_TOL)
     )
     df = df.with_columns(
-        pl.when(minor_unit).then(pl.col("price") / MINOR_UNIT_RATIO).otherwise(pl.col("price")).alias("price")
+        pl.when(minor_unit).then(pl.col("price") * MINOR_UNIT_FACTOR).otherwise(pl.col("price")).alias("price")
     )
     off_trade = (
         (pl.col("is_trade") == True)
@@ -993,7 +1019,7 @@ def process_shard_folder_polars(shard_dir: Path, tmp_format: str, direction: str
         & pl.col("prev_mid_ref").is_not_null()
         & ((pl.col("price") / pl.col("prev_mid_ref") - 1).abs() > MAX_TRADE_DEV)
     )
-    df = df.filter(~off_trade)
+    df = df.filter(~off_trade.fill_null(False))
     df = df.with_columns(
         pl.col("mid_ref").shift(1).over(["ric", "date_local"]).alias("prev_mid_ref")
     )
@@ -1024,8 +1050,9 @@ def process_shard_folder_polars(shard_dir: Path, tmp_format: str, direction: str
         pdf = df.select(["ric", "date_local", "datetime", "is_trade", "is_quote", "price", "volume",
                          "bid", "ask", "bid_size", "ask_size"]).to_pandas()
         fi_dir, fi_step = fi_direction(pdf)
-        df = df.with_columns(pl.Series("direction_fi", fi_dir.to_numpy()),
-                             pl.Series("fi_step", fi_step.to_numpy()))
+        # NaN (unclassified trade) must become null: polars averages NaN as a value
+        df = df.with_columns(pl.Series("direction_fi", fi_dir.to_numpy()).fill_nan(None),
+                             pl.Series("fi_step", fi_step.to_numpy()).fill_nan(None))
     if direction_mode == "fi":
         df = df.with_columns(pl.col("direction_fi").alias("direction"))
 
@@ -1044,7 +1071,7 @@ def process_shard_folder_polars(shard_dir: Path, tmp_format: str, direction: str
     )
 
     df = df.with_columns(
-        (pl.col("datetime") + pl.duration(minutes=5)).alias("target_dt")
+        (pl.col("datetime") + pl.duration(minutes=5, time_unit="ns")).alias("target_dt")
     )
     right = df.select(
         "ric", "date_local",
@@ -1057,6 +1084,7 @@ def process_shard_folder_polars(shard_dir: Path, tmp_format: str, direction: str
         right_on="ref_dt",
         by=["ric", "date_local"],
         strategy="backward",
+        check_sortedness=False,   # sorted by (ric, date_local, datetime) above
     )
 
     df = df.with_columns(
@@ -1073,7 +1101,7 @@ def process_shard_folder_polars(shard_dir: Path, tmp_format: str, direction: str
     gmt_hours = gmt_clean.cast(pl.Float64, strict=False) * gmt_sign
     target_local_day = (
         pl.col("target_dt")
-        + pl.duration(seconds=(gmt_hours * 3600).round(0).cast(pl.Int64, strict=False))
+        + pl.duration(seconds=(gmt_hours * 3600).round(0).cast(pl.Int64, strict=False), time_unit="ns")
     ).dt.date().cast(pl.Utf8)
     same_day = pl.col("mid_change").is_not_null() & (target_local_day == pl.col("date_local"))
     df = df.with_columns([
@@ -1306,7 +1334,8 @@ def consolidate_phase_two(
 def _build_arg_parser():
     p = argparse.ArgumentParser(description="Stream and preprocess TRTH .csv.gz files.")
     p.add_argument("gz_file", nargs="?", help="Optional single .gz filename under RAW_DIR.")
-    p.add_argument("--engine", choices=["pandas", "polars"], default="pandas")
+    p.add_argument("--engine", choices=["pandas", "polars"], default="polars",
+                   help="polars (default; parity-tested against pandas) or the original pandas engine.")
     p.add_argument("--auto-tune", action="store_true", help="Auto-tune chunk size and workers based on RAM/CPU.")
     p.add_argument("--chunksize", type=int, default=None)
     p.add_argument("--generate-sample", action="store_true", help="Generate a small sample .csv.gz in RAW_DIR.")
@@ -1316,17 +1345,18 @@ def _build_arg_parser():
     p.add_argument("--sample-start-date", default="2023-01-02")
     p.add_argument("--sample-overwrite", action="store_true")
     p.add_argument("--sample-file", default="sample_trth.csv.gz")
-    p.add_argument("--temp-format", choices=["csv", "parquet"], default=DEFAULT_TEMP_FORMAT)
     p.add_argument("--temp-partition-cols", default="ric,day")
     p.add_argument("--temp-parquet-compression", default=DEFAULT_PARQUET_COMPRESSION)
     p.add_argument("--temp-parquet-max-rows", type=int, default=None)
     p.add_argument("--output-format", choices=["csv", "parquet"], default=DEFAULT_OUTPUT_FORMAT)
     p.add_argument("--output-parquet-compression", default=DEFAULT_PARQUET_COMPRESSION)
-    p.add_argument("--phase2-workers", type=int, default=None)
+    p.add_argument("--phase2-workers", type=int, default=None, help="default: number of cores - 2")
     p.add_argument("--direction", choices=["tick", "fi", "both"], default=DIRECTION,
                    help="trade direction: Lee-Ready (quote rule + tick rule), Jurkatis (2022) full-information algorithm, or both (default).")
     p.add_argument("--winsor-ticks", action="store_true",
-                   help=f"winsorize tick-level measures per ric at {LOWER_WINSOR_Q:.2%}/{UPPER_WINSOR_Q:.2%} (default off).")
+                   help=f"winsorize tick-level measures per ric at {LOWER_WINSOR_Q:.2%}/{UPPER_WINSOR_Q:.2%} (default off).".replace("%", "%%"))
+    p.add_argument("--reuse-unmarked-shards", action="store_true",
+                   help="reuse staged shards that lack the _PHASE1_COMPLETE marker (default: error).")
     p.add_argument("--timings", action="store_true", help="Print phase timing logs.")
     p.add_argument("--profile", action="store_true", help="Enable cProfile for the main process.")
     p.add_argument("--profile-out", default="", help="Optional path for profile report.")
@@ -1335,6 +1365,8 @@ def _build_arg_parser():
 def main():
     parser = _build_arg_parser()
     args = parser.parse_args()
+    global REUSE_UNMARKED_SHARDS
+    REUSE_UNMARKED_SHARDS = args.reuse_unmarked_shards
     def _run():
         if args.generate_sample:
             sample_path = RAW_DIR / args.sample_file
@@ -1355,15 +1387,13 @@ def main():
         if not gz_files:
             raise FileNotFoundError(f"No .gz files found in {RAW_DIR}")
 
-        if args.temp_format == "parquet":
+        if args.engine == "polars" or args.output_format == "parquet":
             _require_pyarrow()
         if args.engine == "polars":
             _require_polars()
-            if args.temp_format == "parquet" or args.output_format == "parquet":
-                _require_pyarrow()
 
         parquet_partition_cols = _parse_partition_cols(args.temp_partition_cols)
-        if args.temp_format == "parquet" and not parquet_partition_cols:
+        if not parquet_partition_cols:
             raise ValueError("Parquet temp format requires at least one partition column.")
 
         total_ram, avail_ram = _get_ram_info()
@@ -1374,7 +1404,7 @@ def main():
         log(f"Found {len(gz_files)} .gz files in {RAW_DIR}")
         log(f"Engine: {args.engine}; direction: {args.direction}; tick winsorization: {args.winsor_ticks}")
         # ---- auto-tuned defaults ----
-        effective_phase2_workers = args.phase2_workers if args.phase2_workers is not None else 1
+        effective_phase2_workers = args.phase2_workers if args.phase2_workers is not None else max(1, cpu_total - 2)
         effective_chunksize = args.chunksize if args.chunksize is not None else CHUNKSIZE
         effective_parquet_max_rows = (
             args.temp_parquet_max_rows if args.temp_parquet_max_rows is not None else DEFAULT_PARQUET_MAX_ROWS
@@ -1398,13 +1428,17 @@ def main():
 
         for gz in gz_files:
             log(f"▶ Processing {gz.name} (streamed, two-phase)")
+            # shards staged by an earlier run are reused in whatever format they have;
+            # a fresh Phase 1 writes parquet shards with polars, csv.gz with pandas
+            tmp_format = staged_format(TMP_DIR / gz.stem.replace(".csv", ""), args.engine)
+            log(f"Shard format for {gz.name}: {tmp_format}")
 
             with timed(f"Phase 1 total ({gz.name})", args.timings):
-                if args.engine == "polars" and args.temp_format == "parquet":
+                if args.engine == "polars" and tmp_format == "parquet":
                     staged_root = stage_phase_one_polars(
                         gz,
                         TMP_DIR,
-                        tmp_format=args.temp_format,
+                        tmp_format=tmp_format,
                         parquet_partition_cols=parquet_partition_cols,
                         parquet_compression=args.temp_parquet_compression,
                         parquet_max_rows=effective_parquet_max_rows,
@@ -1415,7 +1449,7 @@ def main():
                         gz,
                         TMP_DIR,
                         chunksize=effective_chunksize,
-                        tmp_format=args.temp_format,
+                        tmp_format=tmp_format,
                         parquet_partition_cols=parquet_partition_cols,
                         parquet_compression=args.temp_parquet_compression,
                         parquet_max_rows=effective_parquet_max_rows,
@@ -1429,7 +1463,7 @@ def main():
                 consolidate_phase_two(
                     staged_root,
                     out_path,
-                    tmp_format=args.temp_format,
+                    tmp_format=tmp_format,
                     out_format=args.output_format,
                     phase2_workers=effective_phase2_workers,
                     parquet_compression=args.output_parquet_compression,

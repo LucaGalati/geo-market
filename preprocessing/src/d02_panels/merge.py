@@ -300,11 +300,24 @@ def merge_with_sample_and_filter(part: pd.DataFrame, counts: dict) -> pd.DataFra
 
 
 # ---------- MAIN PIPELINE ----------
-# prefer the parquet TRTH outputs (trth.py --output-format parquet), else CSV
-files = sorted(glob(str(TRTH_DIR / "ukraine*.parquet"))) or sorted(glob(str(TRTH_DIR / "ukraine*.csv")))
+# one input per TRTH file (ukraineNN): the most recent of ukraineNN.parquet / ukraineNN.csv,
+# so a partial parquet run left next to a complete csv run (or vice versa) cannot be picked up
+_cands = [Path(f) for f in glob(str(TRTH_DIR / "ukraine*.parquet")) + glob(str(TRTH_DIR / "ukraine*.csv"))]
+_by_stem: dict[str, Path] = {}
+for _f in _cands:
+    if _f.stem not in _by_stem or _f.stat().st_mtime > _by_stem[_f.stem].stat().st_mtime:
+        _by_stem[_f.stem] = _f
+files = [str(_by_stem[k]) for k in sorted(_by_stem)]
 if not files:
     raise FileNotFoundError(f"No TRTH parquet/CSV files found in {TRTH_DIR}")
-print(f"TRTH inputs: {len(files)} files ({Path(files[0]).suffix})")
+_n_fmt = {sfx: sum(Path(f).suffix == sfx for f in files) for sfx in (".parquet", ".csv")}
+print(f"TRTH inputs: {len(files)} files (.parquet: {_n_fmt['.parquet']}, .csv: {_n_fmt['.csv']})")
+for _f in sorted(set(_cands) - set(_by_stem.values())):
+    print(f"  skipped {_f.name}: older than {_by_stem[_f.stem].name}")
+_n_staged = len(list((DATA_ROOT / "02_preprocessed" / "tmp").glob("ukraine*")))
+if _n_staged and _n_staged != len(files):
+    print(f"⚠️ {len(files)} TRTH files but {_n_staged} staged folders in 02_preprocessed/tmp: "
+          "is the trth run complete?")
 slog.reset("merge")
 
 counts = {k: set() for k in ["before_merge", "after_merge", "after_nxx", "after_price", "after_fx",

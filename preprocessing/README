@@ -8,21 +8,26 @@ repository root.
       neighbour dummies (nbr_1, nbr_1_or_2), market value >= $10m; returns from priced rows only.
   python preprocessing/src/d01_preprocessing/trth_summary.py  -> data/02_preprocessed/trth/summary/trth_summary.csv
       row/quote/trade counts of the raw .gz files (diagnostic; the numbers are hard-coded in the docs builder).
-  python preprocessing/src/d01_preprocessing/trth.py --phase2-workers 8 --output-format parquet --timings
-      -> data/02_preprocessed/trth/ukraineNN.parquet. Two phases: (1) stream each .gz into shards per
-      RIC x local trading day under data/02_preprocessed/tmp/ (reused if present); (2) per shard:
-      cleaning (crossed quotes, negative prices/volumes, stub quotes with spread/mid > 25%, trades
-      more than 50% from the prevailing mid; London prints in pounds rescaled to pence), prevailing
-      mid within the local day, Lee-Ready direction (quote rule + tick rule) and the Jurkatis (2022)
-      full-information direction (vendored in tradeclass/, MIT; build once with
+  python preprocessing/src/d01_preprocessing/trth.py --timings
+      -> data/02_preprocessed/trth/ukraineNN.parquet (polars engine, parquet output, cores - 2 Phase 2
+      workers by default). Two phases: (1) stream each .gz into shards per RIC x local trading day
+      under data/02_preprocessed/tmp/ukraineNN/ (parquet shards; reused in whatever format they have
+      if the folder exists, so a rerun after a change in the measures redoes only Phase 2); (2) per
+      shard: cleaning (crossed quotes, negative prices/volumes, stub quotes with spread/mid > 25%,
+      trades more than 50% from the prevailing mid; London prints in pounds rescaled to pence),
+      prevailing mid within the local day, Lee-Ready direction (quote rule + tick rule) and the
+      Jurkatis (2022) full-information direction (vendored in tradeclass/, MIT; build once with
       `python setup.py build_ext --inplace` inside that folder), quoted/effective spread, same-day
       five-minute price impact for both directions, depth, dollar volume, trade-to-trade returns,
       volatility of five-minute midpoint returns, aggregation to five-minute buckets (price_close =
-      last trade of the bucket).
+      last trade of the bucket). One file: `trth.py ukraine07.csv.gz`.
         --direction tick|fi|both   trade direction(s) (default both)
         --winsor-ticks             tick-level winsorization at 0.01%/99.99% per RIC (default off)
-        --engine polars --temp-format parquet   polars engine (parity-tested against pandas)
-        --auto-tune, --chunksize, --phase2-workers, --generate-sample (synthetic test file)
+        --phase2-workers N         Phase 2 processes (default cores - 2; 1 worker takes ~16 h)
+        --output-format csv        csv output instead of parquet (merge.py reads both)
+        --engine pandas            the original pandas engine (csv.gz shards; identical results on the
+                                   parity test of 12 Sept 2026: 50 firms, 113,512 five-minute rows; slower)
+        --auto-tune, --chunksize, --generate-sample (synthetic test file)
   python preprocessing/src/d01_preprocessing/count_tick_filters.py
       exact counts of the tick filters over the shards (~1.5 h) -> trth/summary/tick_filter_counts.csv
   python preprocessing/src/d01_preprocessing/validate_fi.py

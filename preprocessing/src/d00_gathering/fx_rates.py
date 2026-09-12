@@ -24,6 +24,9 @@ ECB_URL = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-hist.zip"
 START, END = "2022-01-20", "2022-03-31"
 # venues whose country in markets.csv is wrong for the currency: NLB is the Canadian NEO exchange (CAD)
 VENUE_OVERRIDE = {"NLB": "CAD"}
+# venues quoting in the minor unit (pence, cents, agorot): a fact of the exchange, not inferred
+# from the data, so the table does not depend on the state of the merged panel
+MINOR_UNIT_VENUES = {"L": 100, "J": 100, "TA": 100}
 # ISO 3166-1 alpha-3 country of the exchange -> ISO 4217 currency (2022)
 COUNTRY_CURRENCY = {
     "AUS": "AUD", "THA": "THB", "JPN": "JPY", "IND": "INR", "GBR": "GBP", "KOR": "KRW", "MYS": "MYR",
@@ -78,8 +81,9 @@ def build_venues(rates: pd.DataFrame) -> pd.DataFrame:
     ven["currency"] = ven["currency"].fillna("IMPLIED")
     ven.loc[~ven["currency"].isin(set(rates["currency"])), "currency"] = "IMPLIED"
 
-    # unit factor from the daily panel: local price / Datastream USD price vs the ECB rate
-    ven["unit_factor"] = 1
+    ven["unit_factor"] = ven["suffix"].map(MINOR_UNIT_VENUES).fillna(1).astype(int)
+    # diagnostic only: local price / Datastream USD price vs the ECB rate in the last merged
+    # panel (a ratio near 1 confirms the currency and unit; near 100 flags a missing minor unit)
     ven["check_ratio"] = np.nan
     if DAILY.exists():
         d = pd.read_parquet(DAILY, columns=["ric", "date", "price", "price_mean"])
@@ -92,7 +96,6 @@ def build_venues(rates: pd.DataFrame) -> pd.DataFrame:
         r = implied.groupby("suffix")["ratio"].median()
         ven = ven.merge(r.rename("check_ratio_data"), left_on="suffix", right_index=True, how="left")
         ven["check_ratio"] = ven["check_ratio_data"]; ven = ven.drop(columns="check_ratio_data")
-        ven.loc[(ven["check_ratio"] / 100 - 1).abs() < 0.15, "unit_factor"] = 100
         ven["check_ratio"] = ven["check_ratio"] / ven["unit_factor"]
         bad = ven[ven["currency"].ne("IMPLIED") & ven["check_ratio"].notna() & ((ven["check_ratio"] - 1).abs() > 0.15)]
         if not bad.empty:

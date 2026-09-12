@@ -197,8 +197,9 @@ def build_md(rows):
         t = pd.read_csv(TICK_COUNTS); t = t[t["file"] == "TOTAL"].iloc[0]
         L.append(f"- tick filters (counting pass over the Phase-1 shards): crossed quotes {fmt(t['crossed_quotes'])}, "
                  f"stub quotes {fmt(t['stub_quotes'])} ({t['stub_quotes_pct_of_quotes']:.3f}% of {fmt(t['quotes'])} quotes), "
-                 f"negative price/volume {fmt(t['neg_price_or_volume'])}, bad prints {fmt(t['bad_prints'])} "
-                 f"({t['bad_prints_pct_of_trades']:.4f}% of {fmt(t['trades'])} trades)")
+                 f"negative price/volume {fmt(t['neg_price_or_volume'])}, London prints in pounds rescaled to pence "
+                 f"{fmt(t['rescaled_prints'])} ({t['rescaled_prints_pct_of_trades']:.4f}% of {fmt(t['trades'])} trades), "
+                 f"bad prints {fmt(t['bad_prints'])} ({t['bad_prints_pct_of_trades']:.4f}% of trades)")
     for stage in ["merge", "gathering", "matching", "figures_daily", "figures_intraday", "figures_overnight"]:
         sub = [r for r in rows if r["stage"] == stage]
         if not sub:
@@ -246,7 +247,9 @@ def values(rows):
                      "N_CROSSED": fmt(t["crossed_quotes"]), "N_STUB": fmt(t["stub_quotes"]),
                      "PCT_STUB": f"{t['stub_quotes_pct_of_quotes']:.3f}\\%",
                      "N_NEGATIVE": fmt(t["neg_price_or_volume"]), "N_BADPRINT": fmt(t["bad_prints"]),
-                     "PCT_BADPRINT": f"{t['bad_prints_pct_of_trades']:.4f}\\%"})
+                     "PCT_BADPRINT": f"{t['bad_prints_pct_of_trades']:.4f}\\%",
+                     "N_RESCALED": fmt(t["rescaled_prints"]),
+                     "PCT_RESCALED": f"{t['rescaled_prints_pct_of_trades']:.4f}\\%"})
     info = currency_info()
     if info:
         vals.update({"N_VENUES": fmt(info["n_venues"]), "N_ECB_VENUES": fmt(info["n_ecb"]), "N_ECB_CCY": fmt(info["n_currencies"]),
