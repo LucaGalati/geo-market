@@ -100,10 +100,14 @@ def run(sample: str, group: str):
                   "min_firms": [MIN_FIRMS]}).to_csv(tab_dir / "overnight_sample.csv", index=False)
 
     with open(tab_dir / "overnight_events_table.tex", "w") as f:
-        f.write("\\begin{table}[ht]\n\\centering\n")
-        f.write("\\caption{Real-Time Overnight Events on 24 Feb 2022 (UTC)}\n")
-        f.write("\\begin{tabular}{ccl}\\hline\nNo. & Time (UTC) & Event Description \\\\ \\hline\n")
+        f.write("\\begin{table}[!htp]\n\\centering\n")
+        f.write("\\caption{\\textbf{Real-Time Overnight Events on 24 February 2022 (UTC)} \\\\ \\footnotesize{This table lists the "
+                "military developments reported in real time during the night of 23--24 February 2022, before the opening of the "
+                "European and American equity markets on the day of the Russian invasion of Ukraine. Times are UTC; the events are "
+                "marked by the vertical lines of Figure~\\ref{fig:overnight}, event 2 (the first missile strikes) in bold.}}\n")
+        f.write("\\label{tab:events}\n")
+        f.write("\\begin{tabular}{ccl}\\toprule\nNo. & Time (UTC) & Event \\\\ \\midrule\n")
         for i, (tstr, desc, bold) in enumerate(EVENTS, start=1):
             f.write(f"{i} & {tstr} & {desc} \\\\ \n")
-        f.write("\\hline\n\\end{tabular}\n\\end{table}\n")
+        f.write("\\bottomrule\n\\end{tabular}\n\\end{table}\n")
     print(f"✅ overnight [{sample}|{group}] → {out_dir}")

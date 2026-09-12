@@ -349,7 +349,7 @@ def main():
     build_currencies(currency_info())
     vals = values(rows)
     build_numbers(vals)
-    for stem in ("data_section", "formulas_appendix"):
+    for stem in ("data_section", "appendix_sample", "formulas_appendix"):
         tpl = OUT / f"{stem}.template.tex"
         if tpl.exists():
             fill(tpl, OUT / f"{stem}.tex", vals)

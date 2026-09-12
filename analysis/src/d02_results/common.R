@@ -73,8 +73,6 @@ load_panel <- function(which = "main") {
   d[, dist_bin := cut(dist_ukr, BINS, labels = BIN_LABELS, right = TRUE)]
   d[, dist_bin := relevel(factor(dist_bin, levels = BIN_LABELS), ref = ">3000")]
   d[, ret_war := daily_log_return[date == EVENT][1], by = ric]      # firm return on 24 Feb (NA if none)
-  d[, prevol := mean(vol[post == 0], na.rm = TRUE), by = ric]
-  d[, pre_pimpact := mean(pimpact[post == 0], na.rm = TRUE), by = ric]
   d[, trend := as.numeric(date - min(date))]
   d[]
 }
@@ -87,6 +85,14 @@ get_sample <- function(d_main, d_bal, sample) {
   if (sample == "eb") d <- d[!is.na(eb_weight)]
   d[, w := if (sample == "eb") eb_weight else 1]
   d[, nearby := nbr12]
+  # analysis-level winsorization: each daily variable at the 1st/99th percentiles of its pooled
+  # firm-day distribution within the sample under analysis (the stored panels are not modified)
+  for (v in c("qspread", "espread", "pimpact", "rspread", "ldvol", "ltrades", "vol")) {
+    q <- quantile(d[[v]], c(0.01, 0.99), na.rm = TRUE)
+    d[, (v) := pmin(pmax(get(v), q[1]), q[2])]
+  }
+  d[, prevol := mean(vol[post == 0], na.rm = TRUE), by = ric]            # on the winsorized series
+  d[, pre_pimpact := mean(pimpact[post == 0], na.rm = TRUE), by = ric]
   d[, prevol_z := (prevol - mean(prevol, na.rm = TRUE)) / sd(prevol, na.rm = TRUE)]
   # minus distance standardized within the estimation sample (one unit = one SD closer to Ukraine)
   d[, negdist_z := -(dist_ukr - mean(dist_ukr, na.rm = TRUE)) / sd(dist_ukr, na.rm = TRUE)]

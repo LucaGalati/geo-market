@@ -3,7 +3,7 @@
 # decomposition of the change in the coefficient; (3) heterogeneity by pre-invasion
 # price impact tercile.
 if (!exists("D_MAIN")) { source(file.path(dirname(sys.frame(1)$ofile), "common.R")); D_MAIN <- load_panel("main"); D_BAL <- load_panel("balanced") }
-NOTE_FE <- "Firm and day fixed effects; standard errors double-clustered by firm and day. Controls: log market value and inverse price."
+NOTE_FE <- "Variables winsorized at the 1st and 99th percentiles within the sample. Firm and day fixed effects; standard errors double-clustered by firm and day. Controls: log market value and inverse price."
 
 for (sample in c(SAMPLES, INTERNAL)) {
   d <- get_sample(D_MAIN, D_BAL, sample)
