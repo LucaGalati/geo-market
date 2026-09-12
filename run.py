@@ -47,10 +47,10 @@ STEPS = [
     ("fig_intraday", "analysis", [PY, "analysis/src/d01_figures/intraday.py"], False, "open/close-hour figures and t-tests"),
     ("fig_overnight", "analysis", [PY, "analysis/src/d01_figures/intraday_overnight.py"], False, "overnight figure"),
     ("fig_map",      "analysis", [PY, "analysis/src/d01_figures/descriptives.py"], False, "world map and firms-by-country table"),
-    ("docs",         "analysis", [PY, "analysis/src/d03_docs/build_sampling_docs.py"], False,
-     "sample-selection, currency and balance tables; data-section text"),
     ("regressions",  "analysis", [RSCRIPT, "analysis/src/d02_results/run_all.R"], False,
      "R: descriptives, pre-trends, DiD, dose-response, horse race, mechanism, intraday tables"),
+    ("docs",         "analysis", [PY, "analysis/src/d03_docs/build_sampling_docs.py"], False,
+     "sample-selection, currency and balance tables; data-section text"),
 ]
 NAMES = [s[0] for s in STEPS]
 

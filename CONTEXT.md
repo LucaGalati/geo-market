@@ -42,9 +42,9 @@ Event study of the liquidity of stocks around the Russian invasion of Ukraine (2
 
 ## Regressions (September 2026)
 - **War** — the post-invasion indicator: 1 on and after 24 February 2022 (`post`). The difference-in-differences coefficient is the treatment × War interaction with firm and day fixed effects and standard errors clustered by firm and day.
-- **Negative distance** — minus the great-circle distance of the headquarters from Ukraine in thousands of km (`negdist`); the linear continuous treatment, so that a positive coefficient means a larger effect for closer firms.
+- **Negative distance** — minus the great-circle distance of the headquarters from Ukraine, standardized within the estimation sample (`negdist_z`: one unit is one standard deviation, about 3,350 km, closer to Ukraine); the linear continuous treatment of the regression tables, so that a positive coefficient means a larger effect for closer firms. The unstandardized version in thousands of km (`negdist`) is used only in the dose-response comparison.
 - **Dose** — proximity to Ukraine, 3,000 km minus the distance (in thousands of km), for the dose-response analysis; firms beyond 3,000 km are the untreated reference. **ATT(d)**: effect for the firms of a distance bin; **ACRT(d)**: change of the effect per 1,000 km of proximity between adjacent bins.
 - **War-day return** — the firm's log return on 24 February 2022 (`ret_war`); the economic treatment.
 - **Pre-war volatility** — the firm's average volatility before the invasion, standardized across the firms of the sample (`prevol_z`).
-- **Intensity** — Neighbor₁,₂ × negative distance: the neighbour effect scaled by proximity.
+- **Intensity** — Neighbor₁,₂ × negative distance (standardized): the neighbour effect scaled by proximity; the Neighbor₁,₂ × War coefficient in the intensity regression is the effect at the sample-mean distance.
 - **Decomposition** — effective half-spread = realized half-spread + price impact; used to attribute the spread response to adverse selection (price impact) or to liquidity providers' revenues (realized spread).

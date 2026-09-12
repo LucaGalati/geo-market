@@ -3,7 +3,7 @@
 # decomposition of the change in the coefficient; (3) heterogeneity by pre-invasion
 # price impact tercile.
 if (!exists("D_MAIN")) { source(file.path(dirname(sys.frame(1)$ofile), "common.R")); D_MAIN <- load_panel("main"); D_BAL <- load_panel("balanced") }
-NOTE_FE <- "Firm and day fixed effects; standard errors double-clustered by firm and day. Controls: log market value, inverse price, log number of quotes."
+NOTE_FE <- "Firm and day fixed effects; standard errors double-clustered by firm and day. Controls: log market value and inverse price."
 
 for (sample in c(SAMPLES, INTERNAL)) {
   d <- get_sample(D_MAIN, D_BAL, sample)
@@ -11,7 +11,7 @@ for (sample in c(SAMPLES, INTERNAL)) {
   d[, treat_post := nbr12 * post]
   # (1) decomposition
   m <- list()
-  for (tr in c("nbr12", "negdist")) for (y in c("espread", "rspread", "pimpact")) m[[length(m) + 1]] <- did(y, sprintf("%s:post", tr), d)
+  for (tr in c("nbr12", "negdist_z")) for (y in c("espread", "rspread", "pimpact")) m[[length(m) + 1]] <- did(y, sprintf("%s:post", tr), d)
   save_table(m, "mechanism_decomposition", sample, title = "Effective spread, realized spread and price impact",
              label = paste0("tab:mechanism_decomposition_", sample),
              notes = paste("The effective half-spread is the sum of the realized half-spread and the five-minute price impact.", NOTE_FE))
