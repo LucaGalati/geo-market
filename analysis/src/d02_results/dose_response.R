@@ -51,7 +51,7 @@ for (sample in c(SAMPLES, INTERNAL)) {
   }
   write_tex(rows, c("Distance bin", "Dose", "ATT(d)", "ACRT(d) per 1,000 km", "Firms"), "dose_response_acrt", sample,
             caption = "Dose-response in distance: average treatment effects and causal responses",
-            label = paste0("tab:dose_acrt_", sample), notes = paste(NOTE_DR, "The standard errors are reported in parentheses next to each estimate; $p$-values are denoted as * $p<0.05$, ** $p<0.01$, *** $p<0.001$. The last column reports the number of firms in the bin. Appendix~\\ref{sec:appendixA} gives the variable definitions."))
+            label = paste0("tab:dose_acrt_", sample), notes = paste(NOTE_DR, "The standard errors are reported in parentheses next to each estimate; $p$-values are denoted as * $p<0.05$, ** $p<0.01$, *** $p<0.001$. The last column reports the number of firms in the bin. \\ref{sec:appendixA} gives the variable definitions."))
   # ---- figure ----
   pd <- do.call(rbind, plotdat)
   g <- ggplot(pd, aes(x = dose, y = att)) + geom_hline(yintercept = 0, linetype = 2, colour = "grey50") +
