@@ -1,9 +1,9 @@
 # Baseline difference-in-differences: neighbour dummies, negative distance, economic
 # treatment, intensity, volatility as outcome. Firm and day fixed effects, SEs clustered
-# by firm and day. Headline sample = matched, appendix = main, internal = balanced / eb.
+# by firm and day. Headline sample = matched, appendix = main, internal = balanced.
 if (!exists("D_MAIN")) { source(file.path(dirname(sys.frame(1)$ofile), "common.R")); D_MAIN <- load_panel("main"); D_BAL <- load_panel("balanced") }
 OUTCOMES <- c("qspread", "espread", "ldvol", "ltrades")
-NOTE_FE <- "Variables winsorized at the 1st and 99th percentiles within the sample. Firm and day fixed effects; standard errors double-clustered by firm and day in parentheses. Controls: log market value and inverse price. War = 1 on and after 24 February 2022."
+NOTE_FE <- "Variables winsorized at the 1st and 99th percentiles within the sample. Firm and day fixed effects; $t$-statistics based on standard errors double-clustered by firm and day in parentheses; $p$-values are denoted as * $p<0.05$, ** $p<0.01$, *** $p<0.001$. Controls: log market value and inverse price. War = 1 on and after 24 February 2022."
 
 for (sample in c(SAMPLES, INTERNAL)) {
   d <- get_sample(D_MAIN, D_BAL, sample)

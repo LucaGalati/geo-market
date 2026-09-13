@@ -20,15 +20,17 @@ TABLES <- file.path(ROOT, "analysis", "output", "tables", "regressions")
 FIGURES <- file.path(ROOT, "analysis", "output", "figures")
 EVENT <- as.Date("2022-02-24")
 SAMPLES <- c("matched", "main")            # headline, appendix
-INTERNAL <- c("balanced", "eb")            # footnote only: tables go to TABLES/internal
+INTERNAL <- c("balanced")                  # footnote only: tables go to TABLES/internal
 CONTROLS <- "lmv + invp"
 BINS <- c(0, 500, 1000, 1500, 2000, 3000, Inf)
 BIN_LABELS <- c("0-500", "500-1000", "1000-1500", "1500-2000", "2000-3000", ">3000")
 setFixest_notes(FALSE)
-# table style of the manuscript: variables of interest first and the controls last (order on the raw
-# names), one "TWFEs" row, then No. Obs. / within R2 / adjusted within R2
-setFixest_etable(digits = 3, digits.stats = "r5", se.below = TRUE, depvar = TRUE,
-                 fitstat = ~ n + wr2 + war2,
+# table style of Rehse, Riordan, Rottke and Zietz (JFE 2019): t-statistics in parentheses below the
+# coefficient, stars at 5/1/0.1 percent, Observations and adjusted R2; variables of interest first and
+# the controls last (order on the raw names), one "TWFEs" row
+setFixest_etable(digits = 3, digits.stats = "r3", se.below = TRUE, depvar = TRUE, coefstat = "tstat",
+                 signif.code = c("***" = 0.001, "**" = 0.01, "*" = 0.05),
+                 fitstat = ~ n + ar2,
                  order = "!%^(lmv|invp)$", interaction.order = "!^War$",
                  fixef.group = list("TWFEs" = "Firm|Day"),
                  style.tex = style.tex("aer", model.format = "(1)", yesNo = c("Yes", "No"),
@@ -45,7 +47,7 @@ DICT <- c(qspread = "Quoted spread (\\%)", espread = "Effective spread (\\%)",
           lmv = "Log market value", invp = "1/Price",
           dist_bin = "Distance", pimpact_c = "Price impact (\\%)", ric = "Firm", date = "Day",
           treat_post = "Neighbor$_{1,2}$ $\\times$ War", pi_tercile = "Pre-war price impact",
-          n = "No. Obs.", wr2 = "R$^2$", war2 = "Adj-R$^2$")
+          n = "Observations", ar2 = "Adjusted R$^2$")
 
 # ---------- data ----------
 load_panel <- function(which = "main") {
@@ -54,7 +56,7 @@ load_panel <- function(which = "main") {
             "dollar_volume_sum", "trades_count", "quotes_count", "volatility", "mktval", "price")
   d <- as.data.table(read_parquet(file.path(DATA, sprintf("daily_%s.parquet", which)), col_select = all_of(cols)))
   a <- as.data.table(read_parquet(file.path(DATA, "psm_assignments.parquet"),
-                                  col_select = c("ric", "matched_group", "eb_weight")))
+                                  col_select = c("ric", "matched_group", "matched_partner")))
   d <- merge(d, a, by = "ric", all.x = TRUE)
   d[, date := as.Date(substr(as.character(date), 1, 10))]
   setorder(d, ric, date)
@@ -77,13 +79,11 @@ load_panel <- function(which = "main") {
   d[]
 }
 
-# sample = "matched" (pairs of the matching), "main" (all firms), "balanced" (perfectly
-# balanced panel), "eb" (main, controls weighted by the entropy-balancing weights)
+# sample = "matched" (pairs of the matching), "main" (all firms), "balanced" (perfectly balanced panel)
 get_sample <- function(d_main, d_bal, sample) {
   d <- if (sample == "balanced") copy(d_bal) else copy(d_main)
   if (sample == "matched") d <- d[matched_group %in% c(0, 1)]
-  if (sample == "eb") d <- d[!is.na(eb_weight)]
-  d[, w := if (sample == "eb") eb_weight else 1]
+  d[, w := 1]
   d[, nearby := nbr12]
   # analysis-level winsorization: each daily variable at the 1st/99th percentiles of its pooled
   # firm-day distribution within the sample under analysis (the stored panels are not modified)
@@ -119,14 +119,6 @@ tabular_lines <- function(models, ...) {
   x <- do.call(etable, args)   # etable cannot take `...` directly
   x <- x[grep("begin\\{tabular\\}", x):grep("end\\{tabular\\}", x)]
   stopifnot(grepl("toprule", x[2]), grepl("bottomrule", x[length(x) - 1]))
-  # R2 rows in percent, as in the manuscript
-  r2 <- grepl("^\\s*(Adj-)?R\\$\\^2\\$\\s*&", x)
-  x[r2] <- vapply(x[r2], function(l) {
-    parts <- strsplit(sub("\\\\+\\s*$", "", l), "&")[[1]]
-    vals <- suppressWarnings(as.numeric(trimws(parts[-1])))
-    parts[-1] <- ifelse(is.na(vals), parts[-1], sprintf(" %.2f\\%% ", 100 * vals))
-    paste0(paste(parts, collapse = "&"), "\\\\")
-  }, character(1))
   x
 }
 
@@ -152,7 +144,7 @@ save_panels <- function(panels, titles, file, sample, title, label, notes = NULL
 save_table <- function(models, file, sample, title = NULL, label = NULL, notes = NULL, ...)
   save_panels(list(models), NULL, file, sample, title, label, notes, ...)
 
-stars <- function(p) ifelse(p < 0.01, "***", ifelse(p < 0.05, "**", ifelse(p < 0.10, "*", "")))
+stars <- function(p) ifelse(p < 0.001, "***", ifelse(p < 0.01, "**", ifelse(p < 0.05, "*", "")))   # JFE: 5 / 1 / 0.1 percent
 fmt <- function(x, d = 3) formatC(x, format = "f", digits = d, big.mark = ",")
 
 # hand-written booktabs table (matrix of strings) for descriptives

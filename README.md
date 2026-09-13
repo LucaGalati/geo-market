@@ -11,7 +11,7 @@ The repository has two stages:
   distances), TRTH tick data -> five-minute microstructure measures, ECB exchange rates,
   merged five-minute and daily panels (`preprocessing/data/03_output/*.parquet`).
 - `analysis/` (Python + R): event-window panels (main = unbalanced, balanced = robustness),
-  firm-level matching (Mahalanobis within a propensity caliper, entropy-balancing weights),
+  firm-level matching on market value and price (Mahalanobis within a propensity caliper, Davies and Kim 2009),
   figures, sample-selection tables and paper text, and the R regressions
   (difference-in-differences with firm and day fixed effects, standard errors clustered by
   firm and day; dose-response in distance; horse race with economic exposure; mechanism).
@@ -55,8 +55,8 @@ python analysis/main.py
 
 Samples and groups: `main` (firms with data before and after the invasion) and `balanced`
 (firms on every trading day); `full` (Nearby vs Distant), `matched` (pairs of the matching),
-`eb` (entropy-balanced controls). The paper's headline is the matched sample; the main sample
-is the appendix; balanced and entropy-balanced results are produced under `internal/` only.
+The paper's headline is the matched sample; the main sample is the appendix; the balanced-sample
+results are produced under `internal/` only.
 
 ## Rerun by hand
 
@@ -72,10 +72,11 @@ it and everything below; `python run.py --from <step>` does exactly that.
 | 4 | `python preprocessing/src/d00_gathering/fx_rates.py` | `preprocessing/data/01_raw/handcoded/{fx_rates_ecb,venue_currency}.csv` (ECB rates, currency and unit of every venue) | seconds |
 | 5 | `python preprocessing/src/d02_panels/merge.py` | `preprocessing/data/03_output/{intraday,daily}{,_AERO_DEF,_RUS_UKR}.parquet` (TRTH x Datastream, USD conversion, screens; picks, per `ukraineNN`, the newest of `.parquet`/`.csv`) | 25 min |
 | 6 | `python analysis/src/d00_preprocessing/gathering.py` | `analysis/data/{daily,intraday}_{main,balanced}.parquet` (event window, main and balanced panels) | minutes |
-| 7 | `python analysis/src/d00_preprocessing/matching.py` | `analysis/data/psm_assignments.parquet`, `psm_balance.csv` (matched pairs, entropy-balancing weights) | minutes |
+| 7 | `python analysis/src/d00_preprocessing/matching.py` | `analysis/data/psm_assignments.parquet`, `psm_balance.csv` (matched pairs on pre-invasion market value and price) | minutes |
 | 8 | `python analysis/src/d01_figures/daily.py`, `intraday.py`, `intraday_overnight.py`, `descriptives.py` | `analysis/output/figures/{daily,intraday,overnight,map}/{sample}/{group}/`, `analysis/output/tables/{firms_by_country,...}` | minutes |
 | 9 | `python analysis/src/d03_docs/build_sampling_docs.py` | `analysis/output/tables/{sample_selection,currencies,matching/balance}.tex`, `docs/paper/sampling/{data_section,formulas_appendix}.tex` (numbers filled in) | seconds |
-| 10 | `Rscript analysis/src/d02_results/run_all.R` | `analysis/output/tables/regressions/{matched,main,internal/*}/*.tex`, `analysis/output/figures/dose_response/` | 20 min |
+| 10 | `Rscript analysis/src/d02_results/run_all.R` | `analysis/output/tables/regressions/{matched,main,internal/*}/*.tex`, `analysis/output/figures/dose_response/` | 4 min |
+| 11 | `python analysis/src/d03_docs/sync_paper.py` | copies `analysis/output/{tables,figures}` into `docs/paper/{tables,figures}` so that `docs/paper/manuscript.tex` compiles from one folder | seconds |
 
 Typical partial reruns: new Datastream file -> from 1; new measures in `trth.py` -> from 2 (3 only if
 the tick filters changed); new screens or currency rules in `merge.py` -> `python run.py --from merge`;

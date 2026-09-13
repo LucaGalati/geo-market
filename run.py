@@ -42,7 +42,7 @@ STEPS = [
     ("gathering",    "analysis", [PY, "analysis/src/d00_preprocessing/gathering.py"], False,
      "event-window panels: main (unbalanced) and balanced"),
     ("matching",     "analysis", [PY, "analysis/src/d00_preprocessing/matching.py"], False,
-     "firm-level matching (Mahalanobis within a propensity caliper) and entropy-balancing weights"),
+     "firm-level matching on market value and price (Mahalanobis within a propensity caliper)"),
     ("fig_daily",    "analysis", [PY, "analysis/src/d01_figures/daily.py"], False, "daily event-study figures"),
     ("fig_intraday", "analysis", [PY, "analysis/src/d01_figures/intraday.py"], False, "open/close-hour figures and t-tests"),
     ("fig_overnight", "analysis", [PY, "analysis/src/d01_figures/intraday_overnight.py"], False, "overnight figure"),
@@ -51,6 +51,8 @@ STEPS = [
      "R: descriptives, pre-trends, DiD, dose-response, horse race, mechanism, intraday tables"),
     ("docs",         "analysis", [PY, "analysis/src/d03_docs/build_sampling_docs.py"], False,
      "sample-selection, currency and balance tables; data-section text"),
+    ("paper",        "analysis", [PY, "analysis/src/d03_docs/sync_paper.py"], False,
+     "copy analysis/output/{tables,figures} into docs/paper so the manuscript compiles from one folder"),
 ]
 NAMES = [s[0] for s in STEPS]
 

@@ -1,24 +1,25 @@
 """Firm-level matching for the event study. One estimation on the daily main
 panel, applied everywhere by joining on `ric`.
 
-Main method  : Mahalanobis matching on the standardized log covariates
-               (mktval, dollar volume, quoted spread) WITHIN a propensity
-               caliper of 0.2*SD(logit PS) (Rubin & Thomas 2000; Austin 2011),
-               1:1 without replacement, optimal assignment (Hungarian).
-Robustness   : entropy balancing (Hainmueller 2012) — weights on the controls
-               that exactly reproduce the treated means of the log covariates,
-               all controls retained (`eb_weight`; treated firms weigh 1).
+Covariates : pre-invasion firm-level medians of the Datastream market value and
+             share price (U.S. dollars), the two characteristics that Davies and
+             Kim (2009, JFM) find to give matched-sample tests of trade execution
+             costs the best size and power; liquidity measures are not used as
+             matching characteristics.
+Method     : Mahalanobis matching on the standardized log covariates WITHIN a
+             propensity caliper (Rubin & Thomas 2000; Austin 2011), 1:1 without
+             replacement, optimal assignment (Hungarian); the caliper is the widest
+             of a grid that leaves every post-matching |SMD| below 0.10.
 
-Output: one ric-level table (`psm_assignments.parquet`) + a balance table
-(`psm_balance.csv`). The panels themselves are never rewritten.
+Output: one ric-level table (`psm_assignments.parquet`, with the partner of every
+matched firm) + a balance table (`psm_balance.csv`). The panels are never rewritten.
 """
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import linear_sum_assignment, minimize
+from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist
-from scipy.special import logsumexp
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
@@ -29,7 +30,7 @@ except ImportError:
 
 TREATED_FLAG = "nbr_1_or_2"
 CUTOFF = pd.Timestamp("2022-02-24", tz="UTC")
-COVARS = ["mktval", "dollar_volume_sum", "qspread_mean"]  # log-transformed
+COVARS = ["mktval", "price"]  # Datastream, U.S. dollars; log-transformed
 # caliper (in SD of logit PS): the widest candidate that leaves every |SMD| below
 # SMD_WARN is used; if none does, the one with the smallest max |SMD|
 CALIPER_CANDIDATES = (0.20, 0.15, 0.10, 0.05, 0.025)
@@ -136,62 +137,23 @@ def match(agg: pd.DataFrame):
     return out, pd.DataFrame(balance), Xs, info
 
 
-# ---------- ROBUSTNESS: entropy balancing ----------
-def entropy_balance(agg: pd.DataFrame, Xs: np.ndarray):
-    """Hainmueller (2012): control weights w_i ∝ exp(-x_i'λ) whose weighted
-    means equal the treated means. λ solves the convex dual
-    min_λ log Σ_i exp(-(x_i - m)'λ). Weights are rescaled to sum to the number
-    of treated firms so a control weight is comparable to a treated weight of 1."""
-    y = agg[TREATED_FLAG].to_numpy()
-    t, c = y == 1, y == 0
-    Z = Xs[c] - Xs[t].mean(axis=0)  # centered on treated means
-
-    def dual(lam):
-        a = -Z @ lam
-        lse = logsumexp(a)
-        w = np.exp(a - lse)
-        return lse, -Z.T @ w
-
-    res = minimize(dual, np.zeros(Z.shape[1]), jac=True, method="BFGS", options={"gtol": 1e-10, "maxiter": 5000})
-    a = -Z @ res.x
-    w = np.exp(a - logsumexp(a))  # sums to 1 over controls
-    max_gap = float(np.abs(Z.T @ w).max())
-    ess = float(1.0 / np.sum(w ** 2))
-    print(f"[eb] converged={res.success} | max |weighted moment gap| = {max_gap:.2e} | "
-          f"effective controls = {ess:,.0f} of {int(c.sum()):,}")
-    if max_gap > 1e-4:
-        print("⚠️ entropy balancing did not reach exact balance (treated means may lie outside the control support).")
-
-    eb = pd.Series(np.nan, index=agg.index)
-    eb[t] = 1.0
-    eb[c] = w * t.sum()
-    balance = [{"method": "entropy_balancing", "variable": f"log({col})",
-                "smd_before": _smd(Xs[t, k], Xs[c, k]),
-                "smd_after": _smd(Xs[t, k], Xs[c, k], w_c=w)} for k, col in enumerate(COVARS)]
-    return eb, pd.DataFrame(balance), ess
-
-
 # ---------- DRIVER ----------
 def run(in_path: Path, out_assign: Path, out_balance: Path) -> pd.DataFrame:
     slog.reset("matching")
     agg = firm_level_pre(load_daily(in_path))
     matched, bal_m, Xs, info = match(agg)
-    eb, bal_e, ess = entropy_balance(agg, Xs)
     n_t, n_c = int((agg[TREATED_FLAG] == 1).sum()), int((agg[TREATED_FLAG] == 0).sum())
-    slog.log("matching", "Firms with valid pre-period covariates (median mktval, dollar volume, quoted spread > 0)",
+    slog.log("matching", "Firms with valid pre-period covariates (median market value and price > 0)",
              firms=len(agg), note=f"treated {n_t:,}, control {n_c:,}")
-    slog.log("matching", "Matched pairs (Mahalanobis within propensity caliper, 1:1 without replacement)",
+    slog.log("matching", "Matched pairs (log market value and log price: Mahalanobis within propensity caliper, 1:1 without replacement)",
              firms=info["pairs"], note=f"caliper {info['caliper_sd']}*SD(logit PS) = {info['caliper']:.3f}; max |SMD| {info['max_smd']:.3f}")
     slog.log("matching", "- treated firms without a control inside the caliper", firms=info["unmatched"])
     slog.log("matching", "Matched sample (treated + controls)", firms=2 * info["pairs"])
-    slog.log("matching", "Entropy balancing: effective number of controls", firms=round(ess),
-             note=f"weights on {n_c:,} controls reproducing the treated covariate means")
 
     assignments = pd.concat([agg, matched], axis=1)
-    assignments["eb_weight"] = eb
     assignments.to_parquet(out_assign, index=False)
 
-    balance = pd.concat([bal_m, bal_e], ignore_index=True)
+    balance = bal_m
     balance.to_csv(out_balance, index=False)
     print("[balance]")
     print(balance.round(4).to_string(index=False))

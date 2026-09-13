@@ -40,7 +40,7 @@ for (sample in c(SAMPLES, INTERNAL)) {
   write_tex(rows, c("", "Nearby", "Distant", "Difference", "Nearby", "Distant", "Difference", "Diff.-in-diff."),
             "mean_comparisons", sample, caption = "Nearby versus Distant firms before and after the invasion",
             label = paste0("tab:mean_comparisons_", sample),
-            notes = "Columns (2)-(4) refer to the days before 24 February 2022, columns (5)-(7) to the days on and after; the last column is the difference-in-differences. Standard errors clustered by firm and day in parentheses. *, **, *** denote significance at 10, 5 and 1 percent.")
+            notes = "Columns (2)-(4) refer to the days before 24 February 2022, columns (5)-(7) to the days on and after; the last column is the difference-in-differences. Standard errors clustered by firm and day in parentheses. $p$-values are denoted as * $p<0.05$, ** $p<0.01$, *** $p<0.001$.")
   # ---- firms by industry ----
   f <- d[!duplicated(ric), .(firms = .N, nearby = sum(nearby), distant = sum(1 - nearby)), by = .(industry = indm)][order(-firms)]
   f[is.na(industry) | industry == "", industry := "Unclassified"]

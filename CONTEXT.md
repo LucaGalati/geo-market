@@ -13,8 +13,7 @@ Event study of the liquidity of stocks around the Russian invasion of Ukraine (2
 - **Distant** — every other firm (`nbr_1_or_2 == 0`). Also called *control*.
 - **Full** grouping — Nearby vs Distant over the whole sample.
 - **Matched** grouping — Nearby vs Distant restricted to the pairs of the matching (`matched_group` in `psm_assignments.parquet`; unmatched firms excluded).
-- **Matching** — one estimation on the pre-period firm-level medians of the daily main sample: Mahalanobis distance on log(market value), log(dollar volume), log(quoted spread), within a propensity caliper of 0.2·SD(logit PS), 1:1 without replacement, optimal assignment.
-- **Entropy balancing weights** — `eb_weight`: robustness alternative to matching; control weights that reproduce the treated means of the covariates (treated weight = 1).
+- **Matching** — one estimation on the pre-period firm-level medians of the daily main sample: Mahalanobis distance on log(market value) and log(price) (Datastream, USD; the two characteristics recommended by Davies and Kim 2009), within an adaptive propensity caliper, 1:1 without replacement, optimal assignment; pair differences tested with the Wilcoxon signed-rank test.
 
 ## Time
 - **Trading day** — the *local* calendar day of the exchange (`date_local`), never the UTC day: Asia-Pacific sessions straddle UTC midnight.
@@ -35,8 +34,7 @@ Event study of the liquidity of stocks around the Russian invasion of Ukraine (2
 - **Bad print** — a trade printed more than 50% away from the prevailing midpoint; removed at the source.
 
 ## Added September 2026
-- **Matched main sample** — the main (unbalanced) sample restricted to the pairs of the matching; the headline specification of the paper. The balanced sample and the entropy-balanced weighting are robustness variants.
-- **Entropy-balanced group** — Nearby = all treated firms (weight 1) vs Distant = all control firms weighted by `eb_weight`; a robustness alternative to the matched pairs.
+- **Matched main sample** — the main (unbalanced) sample restricted to the pairs of the matching; the headline specification of the paper. The balanced sample is a robustness variant.
 - **Overnight window** — the fixed interval 23:00 UTC on 23 February to 07:00 UTC on 24 February 2022 over which the overnight figure is drawn for every sample; only Distant firms trade in it.
 - **Sample-selection log** — `analysis/output/sampling/sampling_log.csv`, one row per selection step written by each pipeline stage; the source of the sample table and of the data-section numbers.
 

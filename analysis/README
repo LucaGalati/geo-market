@@ -6,11 +6,11 @@ script can also be run on its own from the repository root. Inputs: preprocessin
       main = firms with >= 1 trading day before and after 24 Feb 2022 (all their days kept);
       balanced = firms on every trading day of the union calendar (robustness). Rows need quoted and
       effective spread, trades, dollar volume, market value, price impact and realized spread.
-  python analysis/src/d00_preprocessing/matching.py    -> data/psm_assignments.parquet (matched_group, eb_weight), data/psm_balance.csv
+  python analysis/src/d00_preprocessing/matching.py    -> data/psm_assignments.parquet (matched_group), data/psm_balance.csv
       one matching on pre-period firm medians of log market value, log dollar volume (USD) and log
       quoted spread: Mahalanobis distance within an adaptive propensity caliper, 1:1 without
-      replacement (optimal assignment); entropy-balancing weights as robustness.
-  python analysis/src/d01_figures/daily.py             -> output/figures/daily/{main,balanced}/{full,matched,eb}/
+      replacement (optimal assignment) on log market value and log price (Datastream, USD; Davies and Kim 2009).
+  python analysis/src/d01_figures/daily.py             -> output/figures/daily/{main,balanced}/{full,matched}/
   python analysis/src/d01_figures/intraday.py          -> output/figures|tables/intraday/... (open/close-hour z-scores, Welch t-tests)
   python analysis/src/d01_figures/intraday_overnight.py-> output/figures|tables/overnight/...
   python analysis/src/d01_figures/descriptives.py      -> output/figures|tables/map/... (+ firms_by_country.tex, longtable)
