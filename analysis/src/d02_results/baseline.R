@@ -3,7 +3,6 @@
 # by firm and day. Headline sample = matched, appendix = main, internal = balanced.
 if (!exists("D_MAIN")) { source(file.path(dirname(sys.frame(1)$ofile), "common.R")); D_MAIN <- load_panel("main"); D_BAL <- load_panel("balanced") }
 OUTCOMES <- c("qspread", "espread", "ldvol", "ltrades")
-NOTE_FE <- "Variables winsorized at the 1st and 99th percentiles within the sample. Firm and day fixed effects; $t$-statistics based on standard errors double-clustered by firm and day in parentheses; $p$-values are denoted as * $p<0.05$, ** $p<0.01$, *** $p<0.001$. Controls: log market value and inverse price. War = 1 on and after 24 February 2022."
 
 for (sample in c(SAMPLES, INTERNAL)) {
   d <- get_sample(D_MAIN, D_BAL, sample)
@@ -18,7 +17,7 @@ for (sample in c(SAMPLES, INTERNAL)) {
     nm <- if (pair[1] == "qspread") "liquidity" else "activity"
     save_panels(lapply(pair, nbr_models), DICT[pair], paste0("did_neighbour_", nm), sample,
                 title = sprintf("Difference-in-Differences Regressions for %s: Neighbor", if (nm == "liquidity") "Liquidity Measures" else "Trading Activity"),
-                label = paste0("tab:did_nbr_", nm, "_", sample), notes = NOTE_FE)
+                label = paste0("tab:did_nbr_", nm, "_", sample), notes = paste(NOTE_FE, "Neighbor$_1$ equals one for firms headquartered in a country bordering Ukraine (Belarus, Poland, Slovakia, Hungary, Romania, Moldova), Neighbor$_2$ for firms headquartered in a country bordering one of those, and Neighbor$_{1,2}$ for either. Columns (3) and (4) exclude the first-degree firms, so that the second-degree indicator is estimated against firms that are not neighbors of Ukraine at all; this is why the number of observations in those columns is smaller than in the others."))
   }
   # negative distance (linear TWFE summary), all outcomes
   m <- unlist(lapply(OUTCOMES, function(y) list(did(y, "negdist_z:post", d, FALSE), did(y, "negdist_z:post", d, TRUE))), recursive = FALSE)
@@ -33,8 +32,9 @@ for (sample in c(SAMPLES, INTERNAL)) {
   # intensity: neighbour dummy plus neighbour x negative distance
   m <- unlist(lapply(OUTCOMES, function(y) list(did(y, "nbr12:post + intensity:post", d, FALSE),
                                                 did(y, "nbr12:post + intensity:post", d, TRUE))), recursive = FALSE)
-  save_table(m, "did_intensity", sample, title = "Neighbour effect and its intensity in distance",
-             label = paste0("tab:did_intensity_", sample), notes = NOTE_FE)
+  save_table(m, "did_intensity", sample, title = "Neighbor effect and its intensity in distance",
+             label = paste0("tab:did_intensity_", sample),
+             notes = paste(NOTE_FE, "$-$Distance (z) is minus the great-circle distance of the headquarters from Ukraine, standardized within the sample (one unit is one standard deviation closer to Ukraine), so a positive coefficient means a larger effect for closer firms. The row Neighbor$_{1,2}$ $\\times$ $-$Distance (z) $\\times$ War is the additional effect of one standard deviation of proximity within the exposed group, and the row Neighbor$_{1,2}$ $\\times$ War the effect for an exposed firm at the average distance of the sample."))
   # volatility as outcome
   m <- list(feols(vol ~ post, d, weights = ~w, cluster = ~ ric + date, fixef = "ric"),
             feols(as.formula(sprintf("vol ~ post + %s | ric", CONTROLS)), d, weights = ~w, cluster = ~ ric + date))
@@ -45,6 +45,6 @@ for (sample in c(SAMPLES, INTERNAL)) {
   }
   save_table(m, "did_volatility_outcome", sample, title = "Volatility around the invasion",
              label = paste0("tab:did_vol_", sample),
-             notes = paste("Volatility is the daily standard deviation of five-minute midpoint returns, in percent. Columns (1)-(2) have firm fixed effects only;", NOTE_FE),
+             notes = paste(NOTE_FE, "Volatility, the daily standard deviation of the five-minute midpoint returns in percent, is the dependent variable of every column. Neighbor$_1$, Neighbor$_2$ and Neighbor$_{1,2}$ indicate a firm headquartered in a first-degree, in a second-degree, and in a first- or second-degree neighbor of Ukraine; the Neighbor$_2$ columns leave the first-degree neighbors out of the sample. $-$Distance (z) is minus the great-circle distance of the headquarters from Ukraine, standardized within the sample (one unit is one standard deviation closer to Ukraine), so a positive coefficient means a larger effect for closer firms. Columns (1) and (2) have firm fixed effects only and no day fixed effects, so that the coefficient of War is the change in volatility common to all firms; the remaining columns have both, as the Firm FEs and Day FEs rows report."),
              fixef.group = FALSE)
 }

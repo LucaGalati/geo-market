@@ -8,7 +8,7 @@ suppressPackageStartupMessages(library(ggplot2))
 OUTCOMES <- c("qspread", "espread", "ldvol", "ltrades")
 TREATED_BINS <- c("2000-3000", "1500-2000", "1000-1500", "500-1000", "0-500")   # increasing dose (proximity)
 DOSE <- 3 - c(2.5, 1.75, 1.25, 0.75, 0.25)                                     # 3,000 km minus the bin midpoint, in 1,000 km
-NOTE_DR <- "Dose = proximity to Ukraine, 3,000 km minus the distance of the headquarters (in thousands of km); firms more than 3,000 km away are the untreated reference. ATT(d): coefficient of the bin $\\times$ War interaction in a two-way fixed effects regression with the controls of the baseline tables; ACRT: change in ATT between adjacent bins per 1,000 km of proximity (delta-method standard errors); the dose-weighted average follows Corollary 3.1 of Callaway, Goodman-Bacon and Sant'Anna (2025). Standard errors double-clustered by firm and day."
+NOTE_DR <- "This table reports how the effect of the war varies with the distance of the headquarters from Ukraine, following \\citet{callaway2024difference}. The dose is the proximity to Ukraine, 3,000 km minus the distance of the headquarters, in thousands of km; the firms more than 3,000 km away are the untreated reference group. ATT(d) is the coefficient of the bin $\\times$ War interaction in a two-way fixed effects regression with firm and day fixed effects and the controls of the baseline tables (log market value and inverse price), that is the average effect of the war on the firms of that distance bin relative to the reference group; ACRT(d) is the change in ATT between adjacent bins per 1,000 km of proximity, with standard errors from the covariance matrix of the bin coefficients, and the dose-weighted average follows Corollary 3.1 of \\citet{callaway2024difference}. The dose-response table also reports, for comparison, the coefficient of the linear specification, $-$Distance $\\times$ War per 1,000 km of proximity. ATT(d) and ACRT(d) are in the units of the outcome of the block: percentage points for the spreads, log points for dollar volume and the number of trades. Variables winsorized at the 1st and 99th percentiles within the sample; War = 1 on and after 24 February 2022. Standard errors double-clustered by firm and day."
 
 for (sample in c(SAMPLES, INTERNAL)) {
   d <- get_sample(D_MAIN, D_BAL, sample)
@@ -16,7 +16,7 @@ for (sample in c(SAMPLES, INTERNAL)) {
   # ---- ATT by bin ----
   m <- lapply(OUTCOMES, function(y) did(y, 'i(dist_bin, post, ref = ">3000")', d))
   names(m) <- OUTCOMES
-  save_table(m, "dose_response_bins", sample, title = "Effects by distance bin", label = paste0("tab:dose_bins_", sample), notes = NOTE_DR)
+  save_table(m, "dose_response_bins", sample, title = "Effects by distance bin", label = paste0("tab:dose_bins_", sample), notes = paste(NOTE_DR, "$t$-statistics in parentheses; $p$-values are denoted as * $p<0.05$, ** $p<0.01$, *** $p<0.001$."))
   # ---- ACRT between adjacent bins and dose-weighted average ----
   rows <- c(); plotdat <- list()
   w_bin <- sapply(TREATED_BINS, function(b) sum(firms$dist_bin == b)); p_treated <- w_bin / sum(w_bin)
@@ -51,7 +51,7 @@ for (sample in c(SAMPLES, INTERNAL)) {
   }
   write_tex(rows, c("Distance bin", "Dose", "ATT(d)", "ACRT(d) per 1,000 km", "Firms"), "dose_response_acrt", sample,
             caption = "Dose-response in distance: average treatment effects and causal responses",
-            label = paste0("tab:dose_acrt_", sample), notes = NOTE_DR)
+            label = paste0("tab:dose_acrt_", sample), notes = paste(NOTE_DR, "The standard errors are reported in parentheses next to each estimate; $p$-values are denoted as * $p<0.05$, ** $p<0.01$, *** $p<0.001$. The last column reports the number of firms in the bin. Appendix~\\ref{sec:appendixA} gives the variable definitions."))
   # ---- figure ----
   pd <- do.call(rbind, plotdat)
   g <- ggplot(pd, aes(x = dose, y = att)) + geom_hline(yintercept = 0, linetype = 2, colour = "grey50") +

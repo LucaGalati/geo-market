@@ -46,8 +46,11 @@ DICT <- c(qspread = "Quoted spread (\\%)", espread = "Effective spread (\\%)",
           ret_war = "War return", prevol_z = "Pre-war volatility (z)", trend = "Trend",
           lmv = "Log market value", invp = "1/Price",
           dist_bin = "Distance", pimpact_c = "Price impact (\\%)", ric = "Firm", date = "Day",
-          treat_post = "Neighbor$_{1,2}$ $\\times$ War", pi_tercile = "Pre-war price impact",
+          treat_post = "Neighbor$_{1,2}$ $\\times$ War", pi_tercile = "Pre-invasion price impact",
           n = "Observations", ar2 = "Adjusted R$^2$")
+
+# ---------- shared table note (difference-in-differences tables) ----------
+NOTE_FE <- "This table reports difference-in-differences estimates of equation~\\eqref{eq:main_did}, $y_{i,d} = \\beta\\,(\\text{Treat}_{i}\\times\\text{War}_{d}) + X_{i,d}'\\gamma + \\alpha_i + \\lambda_d + \\varepsilon_{i,d}$, where $i$ indexes firms and $d$ local trading days, $y_{i,d}$ is the dependent variable named, with its units, in the column or panel header, $\\text{Treat}_{i}$ is the exposure measure of the row, $\\text{War}_{d}$ is one on and after 24 February 2022 and zero before, and $\\alpha_i$ and $\\lambda_d$ are firm and day fixed effects; $\\text{Treat}_{i}$ and $\\text{War}_{d}$ do not enter separately because the fixed effects absorb them, so $\\beta$ is the effect of the war on the exposed firms relative to the unexposed firms. The sample is the 40 trading days from 27 January to 23 March 2022, 20 on each side of the invasion. Variables winsorized at the 1st and 99th percentiles within the sample. $t$-statistics based on standard errors double-clustered by firm and day in parentheses; $p$-values are denoted as * $p<0.05$, ** $p<0.01$, *** $p<0.001$. Controls: log market value and inverse price."
 
 # ---------- data ----------
 load_panel <- function(which = "main") {
