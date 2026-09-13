@@ -5,7 +5,7 @@ HERE <- (function() { a <- commandArgs(trailingOnly = FALSE); f <- sub("^--file=
 source(file.path(HERE, "common.R"))
 D_MAIN <- load_panel("main")
 D_BAL <- load_panel("balanced")
-for (block in c("descriptives", "pairs", "pretrends", "baseline", "dose_response", "horserace", "mechanism", "intraday")) {
+for (block in c("matching_windows", "descriptives", "pairs", "pretrends", "baseline", "dose_response", "horserace", "mechanism", "intraday")) {
   cat(sprintf("\n=== %s  %s ===\n", block, format(Sys.time(), "%H:%M:%S")))
   t0 <- Sys.time()
   source(file.path(HERE, paste0(block, ".R")), local = TRUE)

@@ -13,7 +13,8 @@ Event study of the liquidity of stocks around the Russian invasion of Ukraine (2
 - **Distant** — every other firm (`nbr_1_or_2 == 0`). Also called *control*.
 - **Full** grouping — Nearby vs Distant over the whole sample.
 - **Matched** grouping — Nearby vs Distant restricted to the pairs of the matching (`matched_group` in `psm_assignments.parquet`; unmatched firms excluded).
-- **Matching** — one estimation on the pre-period firm-level medians of the daily main sample: Mahalanobis distance on log(market value) and log(price) (Datastream, USD; the two characteristics recommended by Davies and Kim 2009), within an adaptive propensity caliper, 1:1 without replacement, optimal assignment; pair differences tested with the Wilcoxon signed-rank test.
+- **Matching** — one estimation on the firm-level medians, over the reference window, of the daily main sample: Mahalanobis distance on log(market value), log(quoted spread) and log(dollar volume), within an adaptive propensity caliper, 1:1 without replacement, optimal assignment; pair differences tested with the Wilcoxon signed-rank test (Davies and Kim 2009). The appendix repeats it on log(market value) and log(price) only (the two characteristics of Davies and Kim) and for the other candidate reference windows.
+- **Reference window** — the pre-invasion trading days over which the matching characteristics are measured (day 0 = 24 February 2022); the main text uses days -20 to -6, leaving out the last week before the invasion; the candidates are -20 to -1, -20 to -10, -20 to -6, -10 to -1 and -5 to -1.
 
 ## Time
 - **Trading day** — the *local* calendar day of the exchange (`date_local`), never the UTC day: Asia-Pacific sessions straddle UTC midnight.

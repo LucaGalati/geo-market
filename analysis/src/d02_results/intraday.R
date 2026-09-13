@@ -8,15 +8,19 @@ DT <- as.data.table(read_parquet(file.path(DATA, "intraday_main.parquet"),
                                  col_select = c("ric", "datetime", "date_local", "nbr_1_or_2", "qspread_mean")))
 A <- as.data.table(read_parquet(file.path(DATA, "psm_assignments.parquet"), col_select = c("ric", "matched_group")))
 DT <- merge(DT, A, by = "ric", all.x = TRUE)
+A <- as.data.table(read_parquet(file.path(DATA, "psm_assignments_dk.parquet"), col_select = c("ric", "matched_group")))
+setnames(A, "matched_group", "matched_group_dk")
+DT <- merge(DT, A, by = "ric", all.x = TRUE)
 DT <- DT[!is.na(datetime) & !is.na(qspread_mean)]
 days <- sort(unique(DT$date_local)); DT[, day_rel := match(date_local, days) - match(as.character(EVENT), days)]
 DT[, `:=`(first_dt = min(datetime), last_dt = max(datetime)), by = .(ric, date_local)]
 DT[, `:=`(is_open = datetime < first_dt + 3600, is_close = datetime > last_dt - 3600)]
-hour_means <- function(flag) DT[get(flag) == TRUE, .(hour_mean = mean(qspread_mean * 100)), by = .(ric, date_local, day_rel, nbr_1_or_2, matched_group)]
+hour_means <- function(flag) DT[get(flag) == TRUE, .(hour_mean = mean(qspread_mean * 100)), by = .(ric, date_local, day_rel, nbr_1_or_2, matched_group, matched_group_dk)]
 OPEN <- hour_means("is_open"); CLOSE <- hour_means("is_close")
 
 for (sample in SAMPLES) {
-  sel <- function(h) { h <- copy(h); if (sample == "matched") h <- h[matched_group %in% c(0, 1)]; h[, nearby := nbr_1_or_2]; h }
+  sel <- function(h) { h <- copy(h); if (sample == "matched") h <- h[matched_group %in% c(0, 1)]
+                       if (sample == "matched_dk") h <- h[matched_group_dk %in% c(0, 1)]; h[, nearby := nbr_1_or_2]; h }
   op <- sel(OPEN); cl <- sel(CLOSE)
   bench <- function(h) h[day_rel >= BENCH[1] & day_rel <= BENCH[2], .(mu = mean(hour_mean), sdv = sd(hour_mean)), by = nearby]
   z <- rbind(merge(cl[day_rel >= PRE[1] & day_rel <= PRE[2]], bench(cl), by = "nearby"),
@@ -36,5 +40,5 @@ for (sample in SAMPLES) {
   write_tex(rows, c("Day", "Nearby", "Distant", "Difference", "SE", "Firm-days"), "intraday_difference", sample,
             caption = "Standardized abnormal quoted spread: Nearby minus Distant by day",
             label = paste0("tab:intraday_", sample),
-            notes = "This table reports the standardized abnormal quoted spread of the Nearby firms, of the Distant firms and the difference between the two, by trading day around the invasion (day 0 is 24 February 2022). For each firm and day the abnormal spread is the mean quoted spread over the closing hour for days $-5$ to $-1$ and over the opening hour for days 0 to $+5$, standardized with the mean and the standard deviation of the same hour in the same group over the benchmark window of days $-20$ to $-6$, so that closing hours are standardized on closing hours and opening hours on opening hours. Nearby firms are headquartered in a country bordering Ukraine or in a country bordering one of those, Distant firms elsewhere; the table of the main text uses the matched sample of pairs (Section~\\ref{sec:matching}) and that of \\ref{sec:appendixC} the full sample. Difference is the coefficient of Nearby $\\times$ day in a regression of the standardized spreads on day fixed effects and their interactions with the Nearby indicator; the standard errors in the SE column are independently clustered at the level of both firms and days \\citep{CameronGelbachMiller2011}, and $p$-values are denoted as * $p<0.05$, ** $p<0.01$, *** $p<0.001$. Firm-days is the number of firm-day observations behind the row, Nearby and Distant together; no winsorization is applied. See \\ref{sec:appendixA} for the construction of the standardized abnormal spreads.")
+            notes = "This table reports the standardized abnormal quoted spread of the Nearby firms, of the Distant firms and the difference between the two, by trading day around the invasion (day 0 is 24 February 2022). For each firm and day the abnormal spread is the mean quoted spread over the closing hour for days $-5$ to $-1$ and over the opening hour for days 0 to $+5$, standardized with the mean and the standard deviation of the same hour in the same group over the benchmark window of days $-20$ to $-6$, so that closing hours are standardized on closing hours and opening hours on opening hours. Nearby firms are headquartered in a country bordering Ukraine or in a country bordering one of those, Distant firms elsewhere; the table of the main text uses the matched sample of pairs (Section~\\ref{sec:matching}) and the appendices repeat it on the full sample (\\ref{sec:appendixC}) and on the sample matched on market value and price (\\ref{sec:appendixE}). Difference is the coefficient of Nearby $\\times$ day in a regression of the standardized spreads on day fixed effects and their interactions with the Nearby indicator; the standard errors in the SE column are independently clustered at the level of both firms and days \\citep{CameronGelbachMiller2011}, and $p$-values are denoted as * $p<0.05$, ** $p<0.01$, *** $p<0.001$. Firm-days is the number of firm-day observations behind the row, Nearby and Distant together; no winsorization is applied. See \\ref{sec:appendixA} for the construction of the standardized abnormal spreads.")
 }

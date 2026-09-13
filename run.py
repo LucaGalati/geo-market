@@ -42,7 +42,7 @@ STEPS = [
     ("gathering",    "analysis", [PY, "analysis/src/d00_preprocessing/gathering.py"], False,
      "event-window panels: main (unbalanced) and balanced"),
     ("matching",     "analysis", [PY, "analysis/src/d00_preprocessing/matching.py"], False,
-     "firm-level matching on market value and price (Mahalanobis within a propensity caliper)"),
+     "firm-level matching on market value, price, quoted spread and dollar volume (Mahalanobis within a propensity caliper), main and candidate reference windows"),
     ("fig_daily",    "analysis", [PY, "analysis/src/d01_figures/daily.py"], False, "daily event-study figures"),
     ("fig_intraday", "analysis", [PY, "analysis/src/d01_figures/intraday.py"], False, "open/close-hour figures and t-tests"),
     ("fig_overnight", "analysis", [PY, "analysis/src/d01_figures/intraday_overnight.py"], False, "overnight figure"),

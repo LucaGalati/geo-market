@@ -19,7 +19,7 @@ DATA <- file.path(ROOT, "analysis", "data")
 TABLES <- file.path(ROOT, "analysis", "output", "tables", "regressions")
 FIGURES <- file.path(ROOT, "analysis", "output", "figures")
 EVENT <- as.Date("2022-02-24")
-SAMPLES <- c("matched", "main")            # headline, appendix
+SAMPLES <- c("matched", "main", "matched_dk")   # headline, appendix (full sample), appendix (Davies-Kim matching)
 INTERNAL <- c("balanced")                  # footnote only: tables go to TABLES/internal
 CONTROLS <- "lmv + invp"
 BINS <- c(0, 500, 1000, 1500, 2000, 3000, Inf)
@@ -61,6 +61,11 @@ load_panel <- function(which = "main") {
   a <- as.data.table(read_parquet(file.path(DATA, "psm_assignments.parquet"),
                                   col_select = c("ric", "matched_group", "matched_partner")))
   d <- merge(d, a, by = "ric", all.x = TRUE)
+  # the appendix matching on market value and price (Davies and Kim 2009)
+  a <- as.data.table(read_parquet(file.path(DATA, "psm_assignments_dk.parquet"),
+                                  col_select = c("ric", "matched_group", "matched_partner")))
+  setnames(a, c("matched_group", "matched_partner"), c("matched_group_dk", "matched_partner_dk"))
+  d <- merge(d, a, by = "ric", all.x = TRUE)
   d[, date := as.Date(substr(as.character(date), 1, 10))]
   setorder(d, ric, date)
   d[, post := as.integer(date >= EVENT)]
@@ -86,6 +91,7 @@ load_panel <- function(which = "main") {
 get_sample <- function(d_main, d_bal, sample) {
   d <- if (sample == "balanced") copy(d_bal) else copy(d_main)
   if (sample == "matched") d <- d[matched_group %in% c(0, 1)]
+  if (sample == "matched_dk") { d <- d[matched_group_dk %in% c(0, 1)]; d[, `:=`(matched_group = matched_group_dk, matched_partner = matched_partner_dk)] }
   d[, w := 1]
   d[, nearby := nbr12]
   # analysis-level winsorization: each daily variable at the 1st/99th percentiles of its pooled
